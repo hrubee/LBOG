@@ -155,7 +155,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         fig, ax = plt.subplots(figsize=(11, 5.5), dpi=150)
 
         close_series = df["close"].values
-        lb_lines = linebreak(close_series, n=3)
+        lb_lines = linebreak(close_series, n=1)
         recent_bricks = lb_lines[-35:] if len(lb_lines) >= 35 else lb_lines
         indices = np.arange(len(recent_bricks))
 
