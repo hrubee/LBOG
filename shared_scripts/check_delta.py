@@ -335,16 +335,7 @@ def run_sync_protection(symbol, side, size, avg_cost, entry_atr, stop_loss_atr_m
             # place a fresh one when none match.
             tol = max(1e-4, abs(sl_px) * 1e-4)
             existing = adapter.list_open_stop_orders(symbol, inst_type)
-            sl_side_orders = []
-            for o in existing:
-                if o.get("side") != close_side:
-                    continue
-                tp = o.get("trigger_price")
-                if tp is None:
-                    continue
-                is_sl_side = (tp <= avg_cost) if side in ("long", "buy") else (tp >= avg_cost)
-                if is_sl_side:
-                    sl_side_orders.append(o)
+            sl_side_orders = [o for o in existing if o.get("side") == close_side and o.get("trigger_price") is not None]
 
             at_target = [o for o in sl_side_orders if o.get("trigger_price") is not None and abs(o["trigger_price"] - sl_px) <= tol]
             stale = [o for o in sl_side_orders if o not in at_target]
