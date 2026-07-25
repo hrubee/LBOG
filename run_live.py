@@ -163,7 +163,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         df_st.rename(columns={'datetime': 'date'}, inplace=True)
 
         lb = LineBreak(df_st)
-        lb.line_number = 1  # 1-Line Break (Option A)
+        lb.line_number = 3  # 3-Line Break (3LB)
         data = lb.get_ohlc_data()
 
         recent_data = data.tail(35).reset_index(drop=True)
@@ -200,7 +200,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
         ax.set_xlim(-1, n_bricks)
 
-        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1]', fontsize=13, fontweight='bold', color='white', pad=12)
+        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [3]', fontsize=13, fontweight='bold', color='white', pad=12)
         ax.set_xlabel('Line Break Brick Index', color='#94A3B8')
         ax.set_ylabel('Price (USD)', color='#94A3B8')
         ax.grid(True, color='#1E293B', linestyle=':', alpha=0.6)
