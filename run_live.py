@@ -388,7 +388,7 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
     return {"active": False, "side": "flat", "size": 0.0, "entry_price": 0.0, "unrealized_pnl": 0.0, "pnl_pct": 0.0, "raw": None}
 
 
-def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 5.0) -> float:
+def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 20.0) -> float:
     """
     Calculate position size based on 1% wallet risk per trade with available margin capping.
     """
