@@ -473,10 +473,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if sl_level > 0:
         trade_size = calculate_1pct_risk_size(adapter, symbol, latest_close, sl_level)
     
-    # Trade Entry logic:
-    # Enter ONLY when a fresh 3LB reversal breakout signal fires (sig == 1 or sig == -1)
-    should_enter_long = (sig == 1)
-    should_enter_short = (sig == -1)
+    # Trade Entry & Re-entry logic:
+    # Enter if a fresh reversal signal fires (sig != 0) OR if flat and aligning with active 3LB trend (lb_dir)
+    should_enter_long = (sig == 1) or (not pos_info["active"] and lb_dir == 1)
+    should_enter_short = (sig == -1) or (not pos_info["active"] and lb_dir == -1)
 
     if should_enter_long:
         if pos_info["active"] and pos_info["side"] == "long":
