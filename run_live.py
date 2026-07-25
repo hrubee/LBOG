@@ -169,7 +169,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         recent_data = data.tail(35).reset_index(drop=True)
         n_bricks = len(recent_data)
 
-        # Draw TradingView Box Bricks using Rectangle patches
+        # Draw TradingView Box Bricks using Rectangle patches (Zero Gap)
         for idx, row in recent_data.iterrows():
             op = row['open']
             cl = row['close']
@@ -178,7 +178,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
             h = max(top - bot, 1.0)
             color = '#22C55E' if cl >= op else '#EF4444'
             
-            rect = patches.Rectangle((idx - 0.35, bot), 0.7, h, facecolor=color, edgecolor='#0E1117', linewidth=1, alpha=0.9)
+            rect = patches.Rectangle((idx - 0.5, bot), 1.0, h, facecolor=color, edgecolor='#0E1117', linewidth=1, alpha=0.9)
             ax.add_patch(rect)
 
         last_idx = n_bricks - 1 if n_bricks > 0 else 0
