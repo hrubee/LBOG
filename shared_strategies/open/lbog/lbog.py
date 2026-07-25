@@ -108,13 +108,13 @@ def lbog_core(
                 # 3LB Reversal Down printed -> flip to Short
                 pos = -1
                 curr_sl = max(x["top"] for x in last_n)
-            elif low[i] <= curr_sl:
+            elif curr_sl > 0.0 and low[i] <= curr_sl:
                 # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
                 # Continue Long -> ratchet SL up to new 3LB breakout level
-                curr_sl = max(curr_sl, min_reversal)
+                curr_sl = min_reversal if curr_sl == 0.0 else max(curr_sl, min_reversal)
 
         elif pos == -1:
             # Short: SL is max top of last N 3LB bricks
@@ -123,13 +123,13 @@ def lbog_core(
                 # 3LB Reversal Up printed -> flip to Long
                 pos = 1
                 curr_sl = min(x["bot"] for x in last_n)
-            elif high[i] >= curr_sl:
+            elif curr_sl > 0.0 and high[i] >= curr_sl:
                 # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
                 # Continue Short -> ratchet SL down to new 3LB breakout level
-                curr_sl = min(curr_sl, max_reversal)
+                curr_sl = max_reversal if curr_sl == 0.0 else min(curr_sl, max_reversal)
 
         position[i] = pos
         sl[i] = curr_sl
