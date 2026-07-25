@@ -437,9 +437,16 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     
     # 1. Fetch OHLCV candles
     candles = adapter.get_ohlcv(symbol, interval=TIMEFRAME, limit=200, inst_type=INST_TYPE)
-    if not candles or len(candles) < 30:
-        logging.warning(f"Insufficient candle data received for {symbol} ({len(candles)} candles). Retrying next cycle.")
-        return
+    # Ensure we only process closed candles (drop in-progress live candle)
+    tf_ms = 5 * 60 * 1000
+    if TIMEFRAME.endswith("m"):
+        tf_ms = int(TIMEFRAME.replace("m", "")) * 60 * 1000
+    elif TIMEFRAME.endswith("h"):
+        tf_ms = int(TIMEFRAME.replace("h", "")) * 3600 * 1000
+
+    now_ms = time.time() * 1000
+    if candles and (now_ms - candles[-1][0]) < tf_ms:
+        candles = candles[:-1]
 
     df = _make_dataframe(candles)
     
