@@ -77,36 +77,72 @@ def send_telegram_notification(msg: str):
     """Send text trade notification via Telegram Bot API."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
+ENTRY_MSGS_FILE = os.path.join(os.getcwd(), "entry_msgs.json")
+def load_entry_msg_ids() -> dict:
+    if os.path.exists(ENTRY_MSGS_FILE):
+        try:
+            with open(ENTRY_MSGS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_entry_msg_ids(msg_dict: dict):
+    try:
+        with open(ENTRY_MSGS_FILE, "w") as f:
+            json.dump(msg_dict, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving entry_msgs.json: {e}")
+
+ENTRY_MSG_IDS = load_entry_msg_ids()
+
+
+def send_telegram_notification(msg: str, reply_to_message_id: int = None) -> int:
+    """Send text notification via Telegram Bot API. Returns message_id."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
     if not token or not chat_id:
-        return
+        return None
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": msg}
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            pass
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("ok"):
+                return data.get("result", {}).get("message_id")
     except Exception as e:
         logging.error(f"Error sending Telegram notification: {e}")
+    return None
 
 
-def send_telegram_photo(image_path: str, caption: str):
-    """Send matplotlib chart image via Telegram Bot sendPhoto API."""
+def send_telegram_photo(image_path: str, caption: str, reply_to_message_id: int = None) -> int:
+    """Send matplotlib chart image via Telegram Bot sendPhoto API. Returns message_id."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
     if not token or not chat_id or not os.path.exists(image_path):
-        return
+        return None
     try:
         url = f"https://api.telegram.org/bot{token}/sendPhoto"
         with open(image_path, "rb") as f:
             files = {"photo": f}
             data = {"chat_id": chat_id, "caption": caption}
+            if reply_to_message_id:
+                data["reply_to_message_id"] = reply_to_message_id
             resp = requests.post(url, data=data, files=files, timeout=10)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                if res_data.get("ok"):
+                    return res_data.get("result", {}).get("message_id")
     except Exception as e:
         logging.error(f"Error sending Telegram photo: {e}")
+    return None
 
 
 def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: float, sl_price: float, fill_id: str) -> str:
@@ -238,11 +274,17 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
         fee_cost = fee_info.get("cost") if isinstance(fee_info, dict) else fee_info
 
         info = trade.get("info", {})
-        pnl = info.get("pnl") or info.get("realized_pnl") or info.get("cashflow") or "0"
+        meta = info.get("meta_data", {})
+        new_pos = meta.get("new_position", {})
+        new_pos_size = new_pos.get("size", None)
+        r_pnl = new_pos.get("realized_pnl") or info.get("pnl") or info.get("realized_pnl") or "0"
+
+        # Determine if this fill is an EXIT (closing out position to size 0)
+        is_exit_fill = (new_pos_size is not None and float(new_pos_size) == 0.0)
 
         fill_record = (
             f"[REAL WALLET FILL] Trade ID: {trade_id} | Time: {timestamp} | Symbol: {symbol} | "
-            f"Side: {side} | Price: ${price} | Amount: {amount} | Cost: ${cost} | Realized PnL: ${pnl} | Fee: ${fee_cost}"
+            f"Side: {side} | Price: ${price} | Amount: {amount} | Cost: ${cost} | Realized PnL: ${r_pnl} | Fee: ${fee_cost}"
         )
         
         # Log to console and local file
@@ -250,28 +292,42 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
         with open(FITS_LOG_FILE, 'a') as lf:
             lf.write(fill_record + "\n")
 
-        # Send instant Telegram fill text notification
-        emoji = "🟢 LONG FILL" if side == "BUY" else "🔴 SHORT FILL"
-        tg_msg = (
-            f"⚡ {emoji}\n\n"
-            f"• Asset: {symbol} Perpetual\n"
-            f"• Action: {side}\n"
-            f"• Fill Price: ${price:,.2f}\n"
-            f"• Size: {amount} {symbol}\n"
-            f"• Notional Value: ${cost:,.2f}\n"
-            f"• Realized PnL: ${pnl}\n"
-            f"• Fee: ${fee_cost}\n"
-            f"• Fill ID: {trade_id[:12]}...\n"
-            f"• Time: {timestamp}"
-        )
-        send_telegram_notification(tg_msg)
+        if is_exit_fill:
+            # EXIT FILL: Reply 'exit' directly to the corresponding entry alert message!
+            reply_id = ENTRY_MSG_IDS.get(symbol)
+            pnl_val = float(r_pnl) if r_pnl else 0.0
+            pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+            exit_text = f"exit (PnL: {pnl_str})" if pnl_val != 0.0 else "exit"
+            
+            send_telegram_notification(exit_text, reply_to_message_id=reply_id)
+            logging.info(f"Sent EXIT reply to Telegram entry message ID {reply_id}: {exit_text}")
+        else:
+            # ENTRY FILL: Send entry alert + 3LB chart photo, and store Telegram message ID
+            emoji = "🟢 LONG FILL" if side == "BUY" else "🔴 SHORT FILL"
+            tg_msg = (
+                f"⚡ {emoji}\n\n"
+                f"• Asset: {symbol} Perpetual\n"
+                f"• Action: {side}\n"
+                f"• Fill Price: ${price:,.2f}\n"
+                f"• Size: {amount} {symbol}\n"
+                f"• Notional Value: ${cost:,.2f}\n"
+                f"• Fee: ${fee_cost}\n"
+                f"• Fill ID: {trade_id[:12]}...\n"
+                f"• Time: {timestamp}"
+            )
+            msg_id = send_telegram_notification(tg_msg)
 
-        # Render and send matplotlib 3LB brick chart photo to Telegram
-        if df is not None:
-            chart_path = render_entry_chart(df, symbol, TIMEFRAME, side, price, sl_level, trade_id)
-            if chart_path and os.path.exists(chart_path):
-                caption = f"📊 <b>{symbol} {TIMEFRAME} Trade Fill Chart</b>\nSide: {side} | Price: ${price:,.2f}"
-                send_telegram_photo(chart_path, caption)
+            if df is not None:
+                chart_path = render_entry_chart(df, symbol, TIMEFRAME, side, price, sl_level, trade_id)
+                if chart_path and os.path.exists(chart_path):
+                    caption = f"📊 <b>{symbol} {TIMEFRAME} Trade Fill Chart</b>\nSide: {side} | Price: ${price:,.2f}"
+                    photo_msg_id = send_telegram_photo(chart_path, caption)
+                    if photo_msg_id:
+                        msg_id = photo_msg_id
+
+            if msg_id:
+                ENTRY_MSG_IDS[symbol] = msg_id
+                save_entry_msg_ids(ENTRY_MSG_IDS)
 
         known_fill_ids.add(trade_id)
         new_fills.append(trade_id)
