@@ -488,15 +488,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                 time.sleep(1)
 
-            logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} (1% Risk)...")
-            order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE)
-            logging.info(f"Order filled: {order_res}")
+            logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+            order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+            logging.info(f"Atomic Order & SL filled: {order_res}")
             time.sleep(1)
-
-            if sl_level > 0:
-                is_buy_sl = False
-                sl_res = adapter.market_stop_loss(symbol, is_buy=is_buy_sl, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
-                logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
 
     elif should_enter_short:
         if pos_info["active"] and pos_info["side"] == "short":
@@ -507,15 +502,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                 time.sleep(1)
 
-            logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} (1% Risk)...")
-            order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE)
-            logging.info(f"Order filled: {order_res}")
+            logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+            order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+            logging.info(f"Atomic Order & SL filled: {order_res}")
             time.sleep(1)
-
-            if sl_level > 0:
-                is_buy_sl = True
-                sl_res = adapter.market_stop_loss(symbol, is_buy=is_buy_sl, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
-                logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:

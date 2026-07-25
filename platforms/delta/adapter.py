@@ -282,7 +282,7 @@ class DeltaExchangeAdapter:
             print(f"Error fetching wallet trades/fills: {e}", file=sys.stderr)
             return []
 
-    def market_open(self, symbol: str, is_buy: bool, size: float, inst_type: str = "spot", reduce_only: bool = False) -> dict:
+    def market_open(self, symbol: str, is_buy: bool, size: float, inst_type: str = "spot", reduce_only: bool = False, stop_loss_price: float = None) -> dict:
         """Place a market order. Returns CCXT order dict with `filled`/`amount`
         rewritten to coin units (not contracts), so callers always see size in
         the same units they passed in. Without this conversion, Go records
@@ -308,6 +308,10 @@ class DeltaExchangeAdapter:
             params["type"] = "future"
             if reduce_only:
                 params["reduceOnly"] = True
+            if stop_loss_price and stop_loss_price > 0:
+                sl_prec = self._exchange.price_to_precision(pair, stop_loss_price)
+                params["stop_loss_price"] = str(sl_prec)
+                params["stop_loss_order_type"] = "market"
 
         result = self._exchange.create_market_order(pair, side, amount, params=params)
         return self._normalize_fill_units(result, contract_size)
