@@ -488,7 +488,15 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     if should_enter_long:
         if pos_info["active"] and pos_info["side"] == "long":
-            logging.info(f"Position is already LONG on {symbol}. No duplicate trade placed.")
+            logging.info(f"Position is already LONG on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
+            try:
+                run_sync_protection(
+                    symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=latest_close,
+                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                    tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                )
+            except Exception as e:
+                logging.error(f"Error syncing protection for LONG position: {e}")
         else:
             if pos_info["active"] and pos_info["side"] == "short":
                 logging.info(f"Reversal signal: Closing active SHORT position on {symbol} first...")
@@ -499,10 +507,27 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
             logging.info(f"Atomic Order & SL filled: {order_res}")
             time.sleep(1)
+            if sl_level > 0:
+                try:
+                    run_sync_protection(
+                        symbol=symbol, side="long", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
+                        stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                        tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                    )
+                except Exception as e:
+                    logging.error(f"Error placing initial SL for LONG: {e}")
 
     elif should_enter_short:
         if pos_info["active"] and pos_info["side"] == "short":
-            logging.info(f"Position is already SHORT on {symbol}. No duplicate trade placed.")
+            logging.info(f"Position is already SHORT on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
+            try:
+                run_sync_protection(
+                    symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=latest_close,
+                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                    tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                )
+            except Exception as e:
+                logging.error(f"Error syncing protection for SHORT position: {e}")
         else:
             if pos_info["active"] and pos_info["side"] == "long":
                 logging.info(f"Reversal signal: Closing active LONG position on {symbol} first...")
@@ -513,6 +538,15 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
             logging.info(f"Atomic Order & SL filled: {order_res}")
             time.sleep(1)
+            if sl_level > 0:
+                try:
+                    run_sync_protection(
+                        symbol=symbol, side="short", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
+                        stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                        tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                    )
+                except Exception as e:
+                    logging.error(f"Error placing initial SL for SHORT: {e}")
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
