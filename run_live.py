@@ -152,6 +152,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
     """
     try:
         from stocktrends import LineBreak
+        import matplotlib.patches as patches
 
         plt.style.use('dark_background')
         fig, ax = plt.subplots(figsize=(11, 5.5), dpi=150)
@@ -168,9 +169,17 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         recent_data = data.tail(35).reset_index(drop=True)
         n_bricks = len(recent_data)
 
-        for index, row in recent_data.iterrows():
-            color = '#22C55E' if row['close'] > row['open'] else '#EF4444'
-            ax.plot([index, index], [row['open'], row['close']], color=color, linewidth=10, alpha=0.9)
+        # Draw TradingView Box Bricks using Rectangle patches
+        for idx, row in recent_data.iterrows():
+            op = row['open']
+            cl = row['close']
+            bot = min(op, cl)
+            top = max(op, cl)
+            h = max(top - bot, 1.0)
+            color = '#22C55E' if cl >= op else '#EF4444'
+            
+            rect = patches.Rectangle((idx - 0.35, bot), 0.7, h, facecolor=color, edgecolor='#0E1117', linewidth=1, alpha=0.9)
+            ax.add_patch(rect)
 
         last_idx = n_bricks - 1 if n_bricks > 0 else 0
         marker_color = '#22C55E' if side.upper() in ('BUY', 'LONG') else '#EF4444'
@@ -189,9 +198,9 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         y_max = max(all_y)
         y_pad = max((y_max - y_min) * 0.08, 15.0)
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
-        ax.set_xlim(-0.8, n_bricks - 0.2)
+        ax.set_xlim(-1, n_bricks)
 
-        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1] (stocktrends)', fontsize=13, fontweight='bold', color='white', pad=12)
+        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1]', fontsize=13, fontweight='bold', color='white', pad=12)
         ax.set_xlabel('Line Break Brick Index', color='#94A3B8')
         ax.set_ylabel('Price (USD)', color='#94A3B8')
         ax.grid(True, color='#1E293B', linestyle=':', alpha=0.6)
