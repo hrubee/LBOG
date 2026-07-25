@@ -141,14 +141,10 @@ def lbog_core(
     # Generate signals (-1, 0, 1) based on position changes
     pos_diff = result["position"].diff().fillna(0).astype(int)
 
-    # Buy signals (enter long or exit short)
+    # Buy signal (enter long from flat or short)
     result["signal"] = np.where((result["position"] == 1) & (pos_diff > 0), 1, 0)
-    # Sell signals (enter short or exit long)
+    # Sell signal (enter short from flat or long)
     result["signal"] = np.where((result["position"] == -1) & (pos_diff < 0), -1, result["signal"])
-    # Exits to flat (position = 0)
-    exit_mask = (result["position"] == 0) & (pos_diff != 0)
-    prev_pos = result["position"].shift(1).fillna(0).astype(int)
-    result["signal"] = np.where(exit_mask, -np.sign(prev_pos), result["signal"])
 
     # Convert signal column to integer
     result["signal"] = result["signal"].astype(int)
