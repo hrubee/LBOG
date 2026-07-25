@@ -102,34 +102,34 @@ def lbog_core(
                 curr_sl = max(x["top"] for x in last_n)
 
         elif pos == 1:
-            # Long: SL is min bot of last N 3LB bricks
-            min_reversal = min(x["bot"] for x in last_n)
+            # Long: SL is previous candle low (low[i-1])
+            prev_low = low[i - 1]
             if bd == -1:
                 # 3LB Reversal Down printed -> flip to Short
                 pos = -1
-                curr_sl = max(x["top"] for x in last_n)
+                curr_sl = high[i - 1]
             elif curr_sl > 0.0 and low[i] <= curr_sl:
                 # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
-                # Continue Long -> ratchet SL up to new 3LB breakout level
-                curr_sl = min_reversal if curr_sl == 0.0 else max(curr_sl, min_reversal)
+                # Continue Long -> ratchet SL up to previous candle low
+                curr_sl = prev_low if curr_sl == 0.0 else max(curr_sl, prev_low)
 
         elif pos == -1:
-            # Short: SL is max top of last N 3LB bricks
-            max_reversal = max(x["top"] for x in last_n)
+            # Short: SL is previous candle high (high[i-1])
+            prev_high = high[i - 1]
             if bd == 1:
                 # 3LB Reversal Up printed -> flip to Long
                 pos = 1
-                curr_sl = min(x["bot"] for x in last_n)
+                curr_sl = low[i - 1]
             elif curr_sl > 0.0 and high[i] >= curr_sl:
                 # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
-                # Continue Short -> ratchet SL down to new 3LB breakout level
-                curr_sl = max_reversal if curr_sl == 0.0 else min(curr_sl, max_reversal)
+                # Continue Short -> ratchet SL down to previous candle high
+                curr_sl = prev_high if curr_sl == 0.0 else min(curr_sl, prev_high)
 
         position[i] = pos
         sl[i] = curr_sl
