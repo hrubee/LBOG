@@ -403,10 +403,13 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     trade_size = get_minimum_trade_size(symbol)
     if sl_level > 0:
         trade_size = calculate_1pct_risk_size(adapter, symbol, latest_close, sl_level)
+    
+    # Trade Entry & Re-entry logic:
+    # Enter if a fresh reversal signal fires (sig != 0) OR if flat and aligning with active 3LB trend (lb_dir)
+    should_enter_long = (sig == 1) or (not pos_info["active"] and lb_dir == 1)
+    should_enter_short = (sig == -1) or (not pos_info["active"] and lb_dir == -1)
 
-    # Enforce single active position rule:
-    # Do not place duplicate entry orders if a position is already active in the same direction!
-    if sig == 1:
+    if should_enter_long:
         if pos_info["active"] and pos_info["side"] == "long":
             logging.info(f"Position is already LONG on {symbol}. No duplicate trade placed.")
         else:
@@ -418,16 +421,14 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} (1% Risk)...")
             order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE)
             logging.info(f"Order filled: {order_res}")
-            
-            # Place initial stop loss
-            if sl_level > 0:
-                logging.info(f"Placing Stop Loss on {symbol} @ ${sl_level:.2f}")
-                try:
-                    adapter.market_stop_loss(symbol, is_buy=False, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
-                except Exception as sl_err:
-                    logging.warning(f"Initial Stop Loss placement warning ({symbol}): {sl_err}")
+            time.sleep(1)
 
-    elif sig == -1:
+            if sl_level > 0:
+                is_buy_sl = False
+                sl_res = adapter.stop_loss_order(symbol, is_buy=is_buy_sl, size=trade_size, trigger_price=sl_level, inst_type=INST_TYPE)
+                logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
+
+    elif should_enter_short:
         if pos_info["active"] and pos_info["side"] == "short":
             logging.info(f"Position is already SHORT on {symbol}. No duplicate trade placed.")
         else:
@@ -439,14 +440,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} (1% Risk)...")
             order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE)
             logging.info(f"Order filled: {order_res}")
-            
-            # Place initial stop loss
+            time.sleep(1)
+
             if sl_level > 0:
-                logging.info(f"Placing Stop Loss on {symbol} @ ${sl_level:.2f}")
-                try:
-                    adapter.market_stop_loss(symbol, is_buy=True, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
-                except Exception as sl_err:
-                    logging.warning(f"Initial Stop Loss placement warning ({symbol}): {sl_err}")
+                is_buy_sl = True
+                sl_res = adapter.stop_loss_order(symbol, is_buy=is_buy_sl, size=trade_size, trigger_price=sl_level, inst_type=INST_TYPE)
+                logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
