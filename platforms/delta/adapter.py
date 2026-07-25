@@ -202,15 +202,21 @@ class DeltaExchangeAdapter:
     def get_ohlcv(self, symbol: str, interval: str = "1h", limit: int = 200, inst_type: str = "spot") -> list:
         """
         Fetch OHLCV candles directly from Delta Exchange live market feed.
+        Uses MARK price candles for futures to match TradingView MARK:BTCUSD 100%.
         """
         if not symbol:
             return []
         
-        # Primary: Fetch directly from Delta Exchange (matches orderbook 100%)
+        # Primary: Fetch directly from Delta Exchange (MARK price for futures)
         pair = self._format_symbol(symbol, inst_type)
         try:
             self._load_markets()
-            candles = self._exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit)
+            params = {}
+            if inst_type == "futures":
+                base_coin = symbol.split("/")[0] if "/" in symbol else symbol
+                params = {"symbol": f"MARK:{base_coin}USD"}
+
+            candles = self._exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit, params=params)
             if candles and len(candles) >= 10:
                 return candles
         except Exception:
