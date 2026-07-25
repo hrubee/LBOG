@@ -182,14 +182,15 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         if sl_price > 0:
             ax.axhline(sl_price, color='#ff9900', linestyle='--', linewidth=1.8, zorder=5, label=f'Stop Loss (${sl_price:,.2f})')
 
-        # Ensure Stop Loss and Entry Price are ALWAYS inside Y-limits with clean padding
+        # Ensure Stop Loss and Entry Price are ALWAYS inside Y-limits with clean proportional padding
         all_y = [b["top"] for b in recent_bricks] + [b["bot"] for b in recent_bricks] + [entry_price]
         if sl_price > 0:
             all_y.append(sl_price)
         
         y_min = min(all_y)
         y_max = max(all_y)
-        y_pad = max((y_max - y_min) * 0.15, 5.0 if symbol.upper() == "ETH" else 20.0)
+        mid_price = (y_max + y_min) / 2.0
+        y_pad = max((y_max - y_min) * 0.15, mid_price * 0.005)
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
 
         # Set adaptive X-limits to fit bricks naturally across the canvas
@@ -472,10 +473,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if sl_level > 0:
         trade_size = calculate_1pct_risk_size(adapter, symbol, latest_close, sl_level)
     
-    # Trade Entry & Re-entry logic:
-    # Enter if a fresh reversal signal fires (sig != 0) OR if flat and aligning with active 3LB trend (lb_dir)
-    should_enter_long = (sig == 1) or (not pos_info["active"] and lb_dir == 1)
-    should_enter_short = (sig == -1) or (not pos_info["active"] and lb_dir == -1)
+    # Trade Entry logic:
+    # Enter ONLY when a fresh 3LB reversal breakout signal fires (sig == 1 or sig == -1)
+    should_enter_long = (sig == 1)
+    should_enter_short = (sig == -1)
 
     if should_enter_long:
         if pos_info["active"] and pos_info["side"] == "long":
@@ -539,16 +540,18 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
 
 def main():
+    is_real = os.environ.get("DELTA_SANDBOX", "1") == "0"
+    mode_name = "REAL Production API" if is_real else "Demo Account API"
     logging.info("=" * 65)
-    logging.info("Starting LBOG Live Execution Daemon on Mac (Delta Exchange Demo)")
+    logging.info(f"Starting LBOG Live Execution Daemon on Mac ({mode_name})")
     logging.info("=" * 65)
     
     adapter = DeltaExchangeAdapter()
     if not adapter.is_live:
-        logging.error("DELTA_DEMO_API_KEY / DELTA_DEMO_API_SECRET missing in .env! Cannot start live runner.")
+        logging.error("Delta API Key / Secret missing in .env! Cannot start live runner.")
         sys.exit(1)
 
-    logging.info(f"Successfully connected to Delta Exchange Demo Account API.")
+    logging.info(f"Successfully connected to Delta Exchange {mode_name}.")
     seed_historical_fill_ids(adapter, SYMBOLS)
     logging.info(f"Starting continuous multi-asset loop for {', '.join(SYMBOLS)} on {TIMEFRAME} chart (polling every {LOOP_INTERVAL}s)... Press Ctrl+C to stop.")
 

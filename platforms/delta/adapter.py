@@ -35,11 +35,11 @@ class DeltaExchangeAdapter:
         sandbox = os.environ.get("DELTA_SANDBOX", "") == "1"
         
         if sandbox:
-            api_key = os.environ.get("DELTA_DEMO_API_KEY", "")
-            api_secret = os.environ.get("DELTA_DEMO_API_SECRET", "")
+            api_key = os.environ.get("DELTA_DEMO_API_KEY") or os.environ.get("DELTA_API_KEY", "")
+            api_secret = os.environ.get("DELTA_DEMO_API_SECRET") or os.environ.get("DELTA_API_SECRET", "")
         else:
-            api_key = os.environ.get("DELTA_LIVE_API_KEY", "")
-            api_secret = os.environ.get("DELTA_LIVE_API_SECRET", "")
+            api_key = os.environ.get("DELTA_LIVE_API_KEY") or os.environ.get("DELTA_API_KEY", "")
+            api_secret = os.environ.get("DELTA_LIVE_API_SECRET") or os.environ.get("DELTA_API_SECRET", "")
 
         config = {
             "enableRateLimit": True,
