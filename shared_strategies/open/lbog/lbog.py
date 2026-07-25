@@ -38,15 +38,15 @@ def linebreak(close: np.ndarray, n: int = 3) -> list[dict]:
 
 def lbog_core(
     df: pd.DataFrame,
-    n: int = 3,
+    n: int = 1,
 ) -> pd.DataFrame:
     """
-    Generate LBOG (Line Break Original) trend-following signals with 3LB brick-based stop loss.
+    Generate LBOG (Line Break Original) trend-following signals with 1-Line-Break (1-candle reversal).
 
     Parameters
     ----------
     df : DataFrame with open, high, low, close columns
-    n : lookback depth for the line break chart reversal (default 3)
+    n : lookback depth for the line break chart reversal (default 1)
 
     Returns
     -------
@@ -156,6 +156,6 @@ def lbog_core(
     return result
 
 
-def lbog_strategy(df: pd.DataFrame, n: int = 3, **kwargs) -> pd.DataFrame:
+def lbog_strategy(df: pd.DataFrame, n: int = 1, **kwargs) -> pd.DataFrame:
     """Strategy wrapper entry-point for open strategy registry."""
     return lbog_core(df, n=n)
