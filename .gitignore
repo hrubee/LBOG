@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 wallet_fills.json
 uv.lock
+*.db
