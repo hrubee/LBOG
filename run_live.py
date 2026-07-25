@@ -147,43 +147,41 @@ def send_telegram_photo(image_path: str, caption: str, reply_to_message_id: int 
 
 def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: float, sl_price: float, fill_id: str) -> str:
     """
-    Renders an authentic dark-mode Three-Line-Break (3LB [3]) brick chart matching Delta Exchange / TradingView.
+    Renders an authentic dark-mode Line Break chart matching Delta Exchange / TradingView using stocktrends.
     Returns path to rendered PNG image.
     """
     try:
+        from stocktrends import LineBreak
+
         plt.style.use('dark_background')
         fig, ax = plt.subplots(figsize=(11, 5.5), dpi=150)
+        fig.patch.set_facecolor('#0E1117')
+        ax.set_facecolor('#0E1117')
 
-        close_series = df["close"].values
-        lb_lines = linebreak(close_series, n=1)
-        recent_bricks = lb_lines[-35:] if len(lb_lines) >= 35 else lb_lines
-        indices = np.arange(len(recent_bricks))
+        df_st = df.reset_index()
+        df_st.rename(columns={'datetime': 'date'}, inplace=True)
 
-        n_bricks = len(recent_bricks)
-        bar_width = 0.5 if n_bricks < 15 else 0.75
+        lb = LineBreak(df_st)
+        lb.line_number = 1  # 1-Line Break (Option A)
+        data = lb.get_ohlc_data()
 
-        for idx, b in enumerate(recent_bricks):
-            top = b["top"]
-            bot = b["bot"]
-            b_dir = b["dir"]
-            h = max(top - bot, 1e-4)
+        recent_data = data.tail(35).reset_index(drop=True)
+        n_bricks = len(recent_data)
 
-            if b_dir >= 0:
-                ax.bar(idx, h, bottom=bot, color='#00ff88', edgecolor='#00ff88', width=bar_width, alpha=0.85)
-            else:
-                ax.bar(idx, h, bottom=bot, color='#ff3366', edgecolor='#ff3366', width=bar_width, alpha=0.85)
+        for index, row in recent_data.iterrows():
+            color = '#22C55E' if row['close'] > row['open'] else '#EF4444'
+            ax.plot([index, index], [row['open'], row['close']], color=color, linewidth=10, alpha=0.9)
 
-        last_idx = indices[-1] if len(indices) > 0 else 0
-        marker_color = '#00ff88' if side.upper() in ('BUY', 'LONG') else '#ff3366'
+        last_idx = n_bricks - 1 if n_bricks > 0 else 0
+        marker_color = '#22C55E' if side.upper() in ('BUY', 'LONG') else '#EF4444'
         marker_symbol = '^' if side.upper() in ('BUY', 'LONG') else 'v'
         
         ax.scatter([last_idx], [entry_price], color=marker_color, s=180, marker=marker_symbol, zorder=6, label=f'{side.upper()} Fill (${entry_price:,.2f})')
 
         if sl_price > 0:
-            ax.axhline(sl_price, color='#ff9900', linestyle='--', linewidth=1.8, zorder=5, label=f'Stop Loss (${sl_price:,.2f})')
+            ax.axhline(sl_price, color='#FACC15', linestyle='--', linewidth=1.8, zorder=5, label=f'Stop Loss (${sl_price:,.2f})')
 
-        # Ensure Stop Loss and Entry Price are ALWAYS inside Y-limits with clean proportional padding
-        all_y = [b["top"] for b in recent_bricks] + [b["bot"] for b in recent_bricks] + [entry_price]
+        all_y = list(recent_data['open'].values) + list(recent_data['close'].values) + [entry_price]
         if sl_price > 0:
             all_y.append(sl_price)
         
@@ -191,25 +189,21 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         y_max = max(all_y)
         y_pad = max((y_max - y_min) * 0.08, 15.0)
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
+        ax.set_xlim(-0.8, n_bricks - 0.2)
 
-        # Set adaptive X-limits to fit bricks naturally across the canvas
-        ax.set_xlim(-0.8, n_bricks - 0.2 + (0.5 if n_bricks < 10 else 0))
-
-        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1]', fontsize=13, fontweight='bold', color='white', pad=12)
-        ax.set_xlabel('3LB Brick Sequence', color='#aaaaaa')
-        ax.set_ylabel('Price (USD)', color='#aaaaaa')
-        ax.grid(True, linestyle=':', alpha=0.22)
+        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1] (stocktrends)', fontsize=13, fontweight='bold', color='white', pad=12)
+        ax.set_xlabel('Line Break Brick Index', color='#94A3B8')
+        ax.set_ylabel('Price (USD)', color='#94A3B8')
+        ax.grid(True, color='#1E293B', linestyle=':', alpha=0.6)
         
-        # Position legend dynamically to avoid covering bricks
-        legend_loc = 'upper right' if (symbol.upper() == 'ETH' or n_bricks < 15) else 'upper left'
-        ax.legend(loc=legend_loc, facecolor='#18181f', edgecolor='#333333')
+        ax.legend(loc='upper left', facecolor='#18181f', edgecolor='#333333')
 
         chart_path = os.path.join(CHARTS_DIR, f'fill_{fill_id[:8]}.png')
-        plt.savefig(chart_path, bbox_inches='tight', facecolor='#111116')
+        plt.savefig(chart_path, bbox_inches='tight', facecolor='#0E1117')
         plt.close(fig)
         return chart_path
     except Exception as e:
-        logging.error(f"Error rendering matplotlib 3LB brick chart: {e}")
+        logging.error(f"Error rendering stocktrends 1LB brick chart: {e}")
         return ""
 
 
