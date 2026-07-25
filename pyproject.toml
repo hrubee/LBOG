@@ -1,0 +1,28 @@
+[project]
+name = "go-trader"
+version = "0.1.0"
+description = "Crypto trading bot — backtesting, paper trading, live trading with risk management"
+requires-python = ">=3.12"
+dependencies = [
+    "ccxt>=4.5.37",
+    "hyperliquid-python-sdk>=0.4.0",
+    "numpy>=2.4.2",
+    "pandas>=3.0.0",
+    "robin-stocks>=3.0.0",
+    "pyotp>=2.9.0",
+    "yfinance>=0.2.0",
+    "matplotlib>=3.8.0",
+    "pillow>=10.0.0",
+    "python-telegram-bot>=20.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["shared_tools", "shared_strategies/open", "shared_strategies/close", "platforms", "backtest/tests"]
