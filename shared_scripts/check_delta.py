@@ -18,8 +18,8 @@ import traceback
 from datetime import datetime, timezone
 
 # Add paths: platforms/delta/ for adapter, shared_tools/ for utilities.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'platforms', 'delta'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared_tools'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'platforms', 'delta')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'shared_tools')))
 
 from atr import ensure_atr_indicator, latest_atr
 from regime import latest_regime
