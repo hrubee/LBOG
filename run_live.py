@@ -390,12 +390,12 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
     return {"active": False, "side": "flat", "size": 0.0, "entry_price": 0.0, "unrealized_pnl": 0.0, "pnl_pct": 0.0, "raw": None}
 
 
-def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 20.0) -> float:
+def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 5.0) -> float:
     """
-    Calculate position size based on 1% wallet risk per trade with available margin capping.
+    Calculate position size based on 3% wallet risk per trade with 5x max leverage margin capping.
     """
     wallet_balance = adapter.get_wallet_balance()
-    risk_amount = wallet_balance * 0.01  # 1% risk of wallet size
+    risk_amount = wallet_balance * 0.03  # 3% risk of wallet size
     risk_distance = abs(entry_price - sl_price)
 
     min_size = get_minimum_trade_size(symbol)
@@ -414,7 +414,7 @@ def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
         pass
 
     raw_size_coin = risk_amount / risk_distance
-    # Cap notional size to 90% of available free margin * max_leverage
+    # Cap notional size to 90% of available free margin * max_leverage (5.0x)
     max_notional = (avail_margin * 0.90) * max_leverage
     max_size_cap = max_notional / entry_price if entry_price > 0 else 0.0
 
@@ -422,8 +422,8 @@ def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
     floored_size = adapter.floor_size(symbol, final_size_coin)
 
     logging.info(
-        f"Lot Sizing [{symbol} 1% Risk + {max_leverage:.0f}x Max Lev]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
-        f"1% Risk = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin:.4f} {symbol}"
+        f"Lot Sizing [{symbol} 3% Risk + {max_leverage:.0f}x Max Lev]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
+        f"3% Risk = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin:.4f} {symbol}"
     )
 
     return floored_size if floored_size >= min_size else min_size
@@ -477,10 +477,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     else:
         logging.info(f"Account Position State ({symbol}): active=False (Flat)")
 
-    # Calculate 1% risk-based position size if entering a new trade
+    # Calculate 3% risk-based position size if entering a new trade (capped at 5x max leverage)
     trade_size = get_minimum_trade_size(symbol)
     if sl_level > 0:
-        trade_size = calculate_1pct_risk_size(adapter, symbol, latest_close, sl_level)
+        trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=5.0)
     
     # Trade Entry logic (Strict 4-Rule Architecture):
     # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1).
