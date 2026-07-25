@@ -42,7 +42,7 @@ import argparse
 # Parse CLI parameters
 parser = argparse.ArgumentParser(description="LBOG Live Strategy Runner")
 parser.add_argument("--symbols", type=str, default="BTC,ETH", help="Comma-separated trading asset symbols (default: BTC,ETH)")
-parser.add_argument("--timeframe", type=str, default="1m", help="Candle timeframe (default: 1m)")
+parser.add_argument("--timeframe", type=str, default="5m", help="Candle timeframe (default: 5m)")
 parser.add_argument("--size", type=float, default=0.001, help="Default fallback position size in coin units (default: 0.001)")
 parser.add_argument("--interval", type=int, default=10, help="Loop sleep interval in seconds (default: 10)")
 args = parser.parse_args()
