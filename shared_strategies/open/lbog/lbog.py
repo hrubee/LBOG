@@ -90,35 +90,26 @@ def lbog_core(
         last_brick = active_lines[-1]
         bd = last_brick["dir"]
         brick_dir[i] = bd
-        last_n = active_lines[-n:] if len(active_lines) >= n else active_lines
-
+        
         if pos == 0:
-            # Flat: enter Long if active brick is Up (1), Short if Down (-1)
             if bd == 1:
                 pos = 1
-                curr_sl = min(x["bot"] for x in last_n)
+                curr_sl = low[i - 1]
             elif bd == -1:
                 pos = -1
-                curr_sl = max(x["top"] for x in last_n)
+                curr_sl = high[i - 1]
 
         elif pos == 1:
-            # Long: SL is previous candle low (low[i-1])
-            prev_low = low[i - 1]
             if bd == -1:
-                # 3LB Reversal Down printed -> flip to Short
                 pos = -1
                 curr_sl = high[i - 1]
             elif curr_sl > 0.0 and low[i] <= curr_sl:
-                # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
-                # Continue Long -> ratchet SL up to previous candle low
-                curr_sl = prev_low if curr_sl == 0.0 else max(curr_sl, prev_low)
+                curr_sl = low[i - 1] if curr_sl == 0.0 else max(curr_sl, low[i - 1])
 
         elif pos == -1:
-            # Short: SL is previous candle high (high[i-1])
-            prev_high = high[i - 1]
             if bd == 1:
                 # 3LB Reversal Up printed -> flip to Long
                 pos = 1
@@ -129,7 +120,7 @@ def lbog_core(
                 curr_sl = 0.0
             else:
                 # Continue Short -> ratchet SL down to previous candle high
-                curr_sl = prev_high if curr_sl == 0.0 else min(curr_sl, prev_high)
+                curr_sl = high[i - 1] if curr_sl == 0.0 else min(curr_sl, high[i - 1])
 
         position[i] = pos
         sl[i] = curr_sl
