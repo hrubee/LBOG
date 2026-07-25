@@ -41,7 +41,7 @@ def lbog_core(
     n: int = 3,
 ) -> pd.DataFrame:
     """
-    Generate LBOG (Line Break Original) trend-following signals with ratcheting stop loss.
+    Generate LBOG (Line Break Original) trend-following signals with 3LB brick-based stop loss.
 
     Parameters
     ----------
@@ -68,68 +68,71 @@ def lbog_core(
     # 1. Compute Line Break bricks
     lb_lines = linebreak(close, n=n)
 
-    # Map line break direction to each bar index
-    brick_dir = np.zeros(num_bars, dtype=int)
-    for line in lb_lines:
-        idx = line["idx"]
-        if idx < num_bars:
-            brick_dir[idx] = line["dir"]
-
-    # Forward fill brick direction so every bar knows the active line break trend
-    for i in range(1, num_bars):
-        if brick_dir[i] == 0:
-            brick_dir[i] = brick_dir[i - 1]
-
-    # 2. Iterate bar-by-bar to simulate state, ratcheting SL, and signals
+    # 2. Iterate bar-by-bar to track active 3LB bricks, ratcheting brick SL, and signals
     position = np.zeros(num_bars, dtype=int)
     sl = np.zeros(num_bars, dtype=float)
+    brick_dir = np.zeros(num_bars, dtype=int)
+
+    line_idx = 0
+    active_lines = []
+    pos = 0
+    curr_sl = 0.0
 
     for i in range(1, num_bars):
-        prev_pos = position[i - 1]
-        prev_sl = sl[i - 1]
-        bd = brick_dir[i]
+        # Ingest line break bricks formed up to bar index i
+        while line_idx < len(lb_lines) and lb_lines[line_idx]["idx"] <= i:
+            active_lines.append(lb_lines[line_idx])
+            line_idx += 1
 
-        if prev_pos == 0:
-            # Flat: enter Long if brick_dir == 1, Short if brick_dir == -1
+        if not active_lines:
+            continue
+
+        last_brick = active_lines[-1]
+        bd = last_brick["dir"]
+        brick_dir[i] = bd
+        last_n = active_lines[-n:] if len(active_lines) >= n else active_lines
+
+        if pos == 0:
+            # Flat: enter Long if active brick is Up (1), Short if Down (-1)
             if bd == 1:
-                position[i] = 1
-                sl[i] = low[i - 1]
+                pos = 1
+                curr_sl = min(x["bot"] for x in last_n)
             elif bd == -1:
-                position[i] = -1
-                sl[i] = high[i - 1]
-            else:
-                position[i] = 0
-                sl[i] = 0.0
+                pos = -1
+                curr_sl = max(x["top"] for x in last_n)
 
-        elif prev_pos == 1:
-            # Long: evaluate SL hit or reversal signal
-            if low[i] <= prev_sl:
+        elif pos == 1:
+            # Long: SL is min bot of last N 3LB bricks
+            min_reversal = min(x["bot"] for x in last_n)
+            if bd == -1:
+                # 3LB Reversal Down printed -> flip to Short
+                pos = -1
+                curr_sl = max(x["top"] for x in last_n)
+            elif low[i] <= curr_sl:
                 # Stop loss hit -> flatten position
-                position[i] = 0
-                sl[i] = 0.0
-            elif bd == -1:
-                # Opposite line break printed -> flip to Short
-                position[i] = -1
-                sl[i] = high[i - 1]
+                pos = 0
+                curr_sl = 0.0
             else:
-                # Continue Long -> ratchet SL up to max(prev_sl, low[i-1])
-                position[i] = 1
-                sl[i] = max(prev_sl, low[i - 1])
+                # Continue Long -> ratchet SL up to new 3LB breakout level
+                curr_sl = max(curr_sl, min_reversal)
 
-        elif prev_pos == -1:
-            # Short: evaluate SL hit or reversal signal
-            if high[i] >= prev_sl:
+        elif pos == -1:
+            # Short: SL is max top of last N 3LB bricks
+            max_reversal = max(x["top"] for x in last_n)
+            if bd == 1:
+                # 3LB Reversal Up printed -> flip to Long
+                pos = 1
+                curr_sl = min(x["bot"] for x in last_n)
+            elif high[i] >= curr_sl:
                 # Stop loss hit -> flatten position
-                position[i] = 0
-                sl[i] = 0.0
-            elif bd == 1:
-                # Opposite line break printed -> flip to Long
-                position[i] = 1
-                sl[i] = low[i - 1]
+                pos = 0
+                curr_sl = 0.0
             else:
-                # Continue Short -> ratchet SL down to min(prev_sl, high[i-1])
-                position[i] = -1
-                sl[i] = min(prev_sl, high[i - 1])
+                # Continue Short -> ratchet SL down to new 3LB breakout level
+                curr_sl = min(curr_sl, max_reversal)
+
+        position[i] = pos
+        sl[i] = curr_sl
 
     result["position"] = position
     result["sl_level"] = sl

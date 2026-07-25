@@ -80,49 +80,47 @@ def test_linebreak_reversal():
 
 
 def test_lbog_long_entry():
-    """Test that LBOG strategy enters Long on first up brick and sets initial SL to low[i-1]."""
+    """Test that LBOG strategy enters Long on first up brick and sets initial SL to min brick bot."""
     closes = [10.0, 11.0, 12.0]
     lows = [9.0, 10.0, 11.0]
     df = make_ohlcv(closes, lows=lows)
     result = lbog_core(df, n=3)
 
     # Bar 0: seed -> Flat (0)
-    # Bar 1: up brick -> enters Long (1), signal=1, SL = low[0] = 9.0
+    # Bar 1: up brick [10, 11] -> enters Long (1), signal=1, SL = min brick bot = 10.0
     assert result["position"].iloc[0] == 0
     assert result["position"].iloc[1] == 1
     assert result["signal"].iloc[1] == 1
-    assert result["sl_level"].iloc[1] == 9.0
+    assert result["sl_level"].iloc[1] == 10.0
 
 
 def test_lbog_trailing_sl_long():
-    """Test that SL trails up but never loosens (ratchets) for Long position."""
-    closes = [10.0, 11.0, 12.0, 12.2]
-    # lows: bar 0: 9.0, bar 1: 10.0, bar 2: 11.5, bar 3: 11.0 (pullback, but close stays above)
+    """Test that SL ratchets up as new 3LB bricks form."""
+    closes = [10.0, 11.0, 12.0, 13.0]
+    # Bar 0: seed 10.0
+    # Bar 1: up brick [10, 11] -> SL = 10.0
+    # Bar 2: up brick [11, 12] -> SL = min(10, 11) = 10.0
+    # Bar 3: up brick [12, 13] -> SL = min(10, 11, 12) = 10.0
     df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 11.0])
     result = lbog_core(df, n=3)
 
-    # Bar 0: Flat (0)
-    # Bar 1: Long (1), SL = low[0] = 9.0
-    # Bar 2: Long (1), SL = max(9.0, low[1] = 10.0) = 10.0
-    # Bar 3: Long (1), SL = max(10.0, low[2] = 11.5) = 11.5
     assert result["position"].iloc[1] == 1
-    assert result["sl_level"].iloc[1] == 9.0
+    assert result["sl_level"].iloc[1] == 10.0
 
     assert result["position"].iloc[2] == 1
     assert result["sl_level"].iloc[2] == 10.0
 
     assert result["position"].iloc[3] == 1
-    assert result["sl_level"].iloc[3] == 11.5
+    assert result["sl_level"].iloc[3] == 10.0
 
 
 def test_lbog_sl_hit():
     """Test that SL hit triggers position exit (to flat/0) and outputs exit signal."""
-    closes = [10.0, 11.0, 12.0, 10.5]
-    # lows: bar 0: 9.0, bar 1: 10.0, bar 2: 11.5, bar 3: 9.8 (which is <= SL=10.0)
-    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 9.8])
+    closes = [10.0, 11.0, 12.0, 12.0]
+    # Bar 1: SL = 10.0. On Bar 3, low[3]=9.5 <= SL=10.0 -> SL hit!
+    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 9.5])
     result = lbog_core(df, n=3)
 
-    # Bar 3: low[3]=9.8 <= SL[2]=10.0 -> SL hit! position becomes 0, signal becomes -1 (exit long)
     assert result["position"].iloc[2] == 1
     assert result["position"].iloc[3] == 0
     assert result["signal"].iloc[3] == -1
@@ -146,7 +144,7 @@ def test_lbog_opposite_brick_flip():
     assert result["position"].iloc[1] == 1
     assert result["position"].iloc[2] == -1
     assert result["signal"].iloc[2] == -1  # Flip signal (sell/short entry)
-    assert result["sl_level"].iloc[2] == 12.0
+    assert result["sl_level"].iloc[2] == 11.0
 
 
 if __name__ == "__main__":
