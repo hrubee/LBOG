@@ -185,12 +185,13 @@ class DeltaExchangeAdapter:
         return 0.0
 
     def get_perp_price(self, symbol: str) -> float:
-        """Get current last price for a perpetual swap (e.g. 'BTC') from Binance."""
+        """Get current last price for a perpetual swap (e.g. 'BTC') directly from Delta Exchange."""
         if not symbol:
             return 0.0
-        pair = self._format_binance_symbol(symbol, "futures")
+        pair = self._format_symbol(symbol, "futures")
         try:
-            ticker = self._public_exchange.fetch_ticker(pair)
+            self._load_markets()
+            ticker = self._exchange.fetch_ticker(pair)
             price = ticker.get("last") or 0
             if price and price > 0:
                 return float(price)
@@ -200,26 +201,25 @@ class DeltaExchangeAdapter:
 
     def get_ohlcv(self, symbol: str, interval: str = "1h", limit: int = 200, inst_type: str = "spot") -> list:
         """
-        Fetch OHLCV candles from Binance live market feed (matches TradingView 100%).
-        Falls back to Delta Exchange if Binance fails.
+        Fetch OHLCV candles directly from Delta Exchange live market feed.
         """
         if not symbol:
             return []
         
-        # Primary: Fetch from Binance Live Market Feed (matches TradingView 100%)
-        binance_pair = self._format_binance_symbol(symbol, inst_type)
+        # Primary: Fetch directly from Delta Exchange (matches orderbook 100%)
+        pair = self._format_symbol(symbol, inst_type)
         try:
-            candles = self._public_exchange.fetch_ohlcv(binance_pair, interval, limit=limit)
+            self._load_markets()
+            candles = self._exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit)
             if candles and len(candles) >= 10:
                 return candles
         except Exception:
             pass
 
-        # Fallback to Delta Exchange
-        pair = self._format_symbol(symbol, inst_type)
+        # Fallback to Binance
+        binance_pair = self._format_binance_symbol(symbol, inst_type)
         try:
-            self._load_markets()
-            candles = self._exchange.fetch_ohlcv(pair, timeframe=interval, limit=limit)
+            candles = self._public_exchange.fetch_ohlcv(binance_pair, interval, limit=limit)
             return candles
         except Exception:
             return []
