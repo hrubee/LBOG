@@ -189,14 +189,13 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         
         y_min = min(all_y)
         y_max = max(all_y)
-        mid_price = (y_max + y_min) / 2.0
-        y_pad = max((y_max - y_min) * 0.15, mid_price * 0.005)
+        y_pad = max((y_max - y_min) * 0.08, 15.0)
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
 
         # Set adaptive X-limits to fit bricks naturally across the canvas
         ax.set_xlim(-0.8, n_bricks - 0.2 + (0.5 if n_bricks < 10 else 0))
 
-        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [3]', fontsize=13, fontweight='bold', color='white', pad=12)
+        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [1]', fontsize=13, fontweight='bold', color='white', pad=12)
         ax.set_xlabel('3LB Brick Sequence', color='#aaaaaa')
         ax.set_ylabel('Price (USD)', color='#aaaaaa')
         ax.grid(True, linestyle=':', alpha=0.22)
