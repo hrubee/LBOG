@@ -434,6 +434,9 @@ def get_minimum_trade_size(symbol: str) -> float:
     return 0.01 if symbol.upper() == "ETH" else 0.001
 
 
+LAST_PROCESSED_CANDLE_TIME = {}
+
+
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     logging.info(f"--- Cycle check: {symbol} ({TIMEFRAME}, {INST_TYPE}) ---")
     
@@ -449,6 +452,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     now_ms = time.time() * 1000
     if candles and (now_ms - candles[-1][0]) < tf_ms:
         candles = candles[:-1]
+
+    if not candles:
+        return
+
+    latest_candle_time = candles[-1][0]
+    is_new_candle = (LAST_PROCESSED_CANDLE_TIME.get(symbol) != latest_candle_time)
 
     df = _make_dataframe(candles)
     
@@ -482,13 +491,14 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if sl_level > 0:
         trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=5.0)
     
-    # Trade Entry logic (Strict 4-Rule Architecture):
-    # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1).
-    # Rule 3: Zero stacking when position is active. Zero mid-trend entries on pullback candles.
-    should_enter_long = (sig == 1)
-    should_enter_short = (sig == -1)
+    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Guard):
+    # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1) AND candle is NEW.
+    # Rule 3: Zero stacking when position is active. Zero duplicate entries within the same 5m bar.
+    should_enter_long = (sig == 1) and is_new_candle
+    should_enter_short = (sig == -1) and is_new_candle
 
     if should_enter_long:
+        LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
         if pos_info["active"] and pos_info["side"] == "long":
             logging.info(f"Position is already LONG on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
             try:
@@ -520,6 +530,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     logging.error(f"Error placing initial SL for LONG: {e}")
 
     elif should_enter_short:
+        LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
         if pos_info["active"] and pos_info["side"] == "short":
             logging.info(f"Position is already SHORT on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
             try:
