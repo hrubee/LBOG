@@ -493,7 +493,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
             if sl_level > 0:
                 is_buy_sl = False
-                sl_res = adapter.stop_loss_order(symbol, is_buy=is_buy_sl, size=trade_size, trigger_price=sl_level, inst_type=INST_TYPE)
+                sl_res = adapter.market_stop_loss(symbol, is_buy=is_buy_sl, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
                 logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
 
     elif should_enter_short:
@@ -512,7 +512,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
             if sl_level > 0:
                 is_buy_sl = True
-                sl_res = adapter.stop_loss_order(symbol, is_buy=is_buy_sl, size=trade_size, trigger_price=sl_level, inst_type=INST_TYPE)
+                sl_res = adapter.market_stop_loss(symbol, is_buy=is_buy_sl, size=trade_size, stop_price=sl_level, inst_type=INST_TYPE)
                 logging.info(f"Initial Stop Loss Order placed @ ${sl_level:.2f}: {sl_res}")
 
     else: # sig == 0
