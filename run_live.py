@@ -302,9 +302,9 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
             send_telegram_notification(exit_text, reply_to_message_id=reply_id)
             logging.info(f"Sent EXIT reply to Telegram entry message ID {reply_id}: {exit_text}")
         else:
-            # ENTRY FILL: Send entry alert + 3LB chart photo, and store Telegram message ID
+            # ENTRY FILL: Send rendered 3LB chart photo with full fill details as its caption!
             emoji = "🟢 LONG FILL" if side == "BUY" else "🔴 SHORT FILL"
-            tg_msg = (
+            caption = (
                 f"⚡ {emoji}\n\n"
                 f"• Asset: {symbol} Perpetual\n"
                 f"• Action: {side}\n"
@@ -315,15 +315,16 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
                 f"• Fill ID: {trade_id[:12]}...\n"
                 f"• Time: {timestamp}"
             )
-            msg_id = send_telegram_notification(tg_msg)
-
+            
+            msg_id = None
             if df is not None:
                 chart_path = render_entry_chart(df, symbol, TIMEFRAME, side, price, sl_level, trade_id)
                 if chart_path and os.path.exists(chart_path):
-                    caption = f"📊 <b>{symbol} {TIMEFRAME} Trade Fill Chart</b>\nSide: {side} | Price: ${price:,.2f}"
-                    photo_msg_id = send_telegram_photo(chart_path, caption)
-                    if photo_msg_id:
-                        msg_id = photo_msg_id
+                    msg_id = send_telegram_photo(chart_path, caption=caption)
+
+            # Fallback to text notification if photo send fails
+            if not msg_id:
+                msg_id = send_telegram_notification(caption)
 
             if msg_id:
                 ENTRY_MSG_IDS[symbol] = msg_id
@@ -388,7 +389,7 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
 
 def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 5.0) -> float:
     """
-    Calculate position size based on 1% wallet risk per trade with leverage safety capping.
+    Calculate position size based on 1% wallet risk per trade with available margin capping.
     """
     wallet_balance = adapter.get_wallet_balance()
     risk_amount = wallet_balance * 0.01  # 1% risk of wallet size
@@ -399,16 +400,27 @@ def calculate_1pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
     if risk_distance <= 0 or entry_price <= 0:
         return min_size
 
+    # Fetch available free margin to prevent 'insufficient_margin' when multiple assets trade simultaneously
+    avail_margin = wallet_balance
+    try:
+        bal_info = adapter._exchange.fetch_balance()
+        free_bal = float(bal_info.get("free", {}).get("USD") or bal_info.get("USD", {}).get("free") or 0.0)
+        if free_bal > 0:
+            avail_margin = free_bal
+    except Exception:
+        pass
+
     raw_size_coin = risk_amount / risk_distance
-    max_notional = wallet_balance * max_leverage
-    max_size_cap = max_notional / entry_price
+    # Cap notional size to 90% of available free margin * max_leverage
+    max_notional = (avail_margin * 0.90) * max_leverage
+    max_size_cap = max_notional / entry_price if entry_price > 0 else 0.0
 
     final_size_coin = min(raw_size_coin, max_size_cap)
     floored_size = adapter.floor_size(symbol, final_size_coin)
 
     logging.info(
-        f"Lot Sizing [{symbol} 1% Risk + {max_leverage:.0f}x Max Lev]: Balance = ${wallet_balance:.2f} | 1% Risk = ${risk_amount:.2f} | "
-        f"Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin} {symbol}"
+        f"Lot Sizing [{symbol} 1% Risk + {max_leverage:.0f}x Max Lev]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
+        f"1% Risk = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin:.4f} {symbol}"
     )
 
     return floored_size if floored_size >= min_size else min_size
