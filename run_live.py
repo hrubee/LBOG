@@ -435,10 +435,15 @@ def get_minimum_trade_size(symbol: str) -> float:
 
 
 LAST_PROCESSED_CANDLE_TIME = {}
+IS_ORDER_IN_FLIGHT = {}
 
 
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     logging.info(f"--- Cycle check: {symbol} ({TIMEFRAME}, {INST_TYPE}) ---")
+    
+    if IS_ORDER_IN_FLIGHT.get(symbol, False):
+        logging.info(f"Order currently in-flight for {symbol}. Skipping new entry check...")
+        return
     
     # 1. Fetch OHLCV candles
     candles = adapter.get_ohlcv(symbol, interval=TIMEFRAME, limit=200, inst_type=INST_TYPE)
@@ -510,24 +515,28 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             except Exception as e:
                 logging.error(f"Error syncing protection for LONG position: {e}")
         else:
-            if pos_info["active"] and pos_info["side"] == "short":
-                logging.info(f"Reversal signal: Closing active SHORT position on {symbol} first...")
-                adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
-                time.sleep(1)
+            IS_ORDER_IN_FLIGHT[symbol] = True
+            try:
+                if pos_info["active"] and pos_info["side"] == "short":
+                    logging.info(f"Reversal signal: Closing active SHORT position on {symbol} first...")
+                    adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
+                    time.sleep(1)
 
-            logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
-            order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
-            logging.info(f"Atomic Order & SL filled: {order_res}")
-            time.sleep(1)
-            if sl_level > 0:
-                try:
-                    run_sync_protection(
-                        symbol=symbol, side="long", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
-                        stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
-                        tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
-                    )
-                except Exception as e:
-                    logging.error(f"Error placing initial SL for LONG: {e}")
+                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+                order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+                logging.info(f"Atomic Order & SL filled: {order_res}")
+                time.sleep(1)
+                if sl_level > 0:
+                    try:
+                        run_sync_protection(
+                            symbol=symbol, side="long", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
+                            stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                            tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                        )
+                    except Exception as e:
+                        logging.error(f"Error placing initial SL for LONG: {e}")
+            finally:
+                IS_ORDER_IN_FLIGHT[symbol] = False
 
     elif should_enter_short:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
@@ -542,24 +551,28 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             except Exception as e:
                 logging.error(f"Error syncing protection for SHORT position: {e}")
         else:
-            if pos_info["active"] and pos_info["side"] == "long":
-                logging.info(f"Reversal signal: Closing active LONG position on {symbol} first...")
-                adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
-                time.sleep(1)
+            IS_ORDER_IN_FLIGHT[symbol] = True
+            try:
+                if pos_info["active"] and pos_info["side"] == "long":
+                    logging.info(f"Reversal signal: Closing active LONG position on {symbol} first...")
+                    adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
+                    time.sleep(1)
 
-            logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
-            order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
-            logging.info(f"Atomic Order & SL filled: {order_res}")
-            time.sleep(1)
-            if sl_level > 0:
-                try:
-                    run_sync_protection(
-                        symbol=symbol, side="short", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
-                        stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
-                        tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
-                    )
-                except Exception as e:
-                    logging.error(f"Error placing initial SL for SHORT: {e}")
+                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+                order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+                logging.info(f"Atomic Order & SL filled: {order_res}")
+                time.sleep(1)
+                if sl_level > 0:
+                    try:
+                        run_sync_protection(
+                            symbol=symbol, side="short", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
+                            stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                            tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                        )
+                    except Exception as e:
+                        logging.error(f"Error placing initial SL for SHORT: {e}")
+            finally:
+                IS_ORDER_IN_FLIGHT[symbol] = False
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
