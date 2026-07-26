@@ -496,6 +496,22 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if sl_level > 0:
         trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=5.0)
     
+    # 1:2 Risk/Reward Take Profit (TP) Calculation
+    risk_dist = abs(latest_close - sl_level) if sl_level > 0 else 30.0
+    tp_level = 0.0
+    if pos_info["active"]:
+        entry_px = pos_info["entry_price"] if pos_info["entry_price"] > 0 else latest_close
+        if pos_info["side"] == "long":
+            tp_level = entry_px + (2.0 * risk_dist)
+        else:
+            tp_level = max(0.0, entry_px - (2.0 * risk_dist))
+    elif sig == 1:
+        tp_level = latest_close + (2.0 * risk_dist)
+    elif sig == -1:
+        tp_level = max(0.0, latest_close - (2.0 * risk_dist))
+
+    tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
+
     # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Guard):
     # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1) AND candle is NEW.
     # Rule 3: Zero stacking when position is active. Zero duplicate entries within the same 5m bar.
@@ -505,11 +521,11 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if should_enter_long:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
         if pos_info["active"] and pos_info["side"] == "long":
-            logging.info(f"Position is already LONG on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
+            logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
                 run_sync_protection(
                     symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=latest_close,
-                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                     tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                 )
             except Exception as e:
@@ -522,7 +538,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                     time.sleep(1)
 
-                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f} & 1:2 TP @ ${tp_level:.2f}...")
                 order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
                 logging.info(f"Atomic Order & SL filled: {order_res}")
                 time.sleep(1)
@@ -530,7 +546,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     try:
                         run_sync_protection(
                             symbol=symbol, side="long", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
-                            stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                            stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                             tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                         )
                     except Exception as e:
@@ -541,11 +557,11 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     elif should_enter_short:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
         if pos_info["active"] and pos_info["side"] == "short":
-            logging.info(f"Position is already SHORT on {symbol}. Syncing ratcheting Stop Loss @ ${sl_level:.2f}...")
+            logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
                 run_sync_protection(
                     symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=latest_close,
-                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                    entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                     tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                 )
             except Exception as e:
@@ -558,7 +574,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                     time.sleep(1)
 
-                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Atomic Bracket SL @ ${sl_level:.2f}...")
+                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f} & 1:2 TP @ ${tp_level:.2f}...")
                 order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
                 logging.info(f"Atomic Order & SL filled: {order_res}")
                 time.sleep(1)
@@ -566,7 +582,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     try:
                         run_sync_protection(
                             symbol=symbol, side="short", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
-                            stop_loss_atr_mult=0.0, tiers_json="", stop_loss_oid="", tp_oids_json="",
+                            stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                             tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                         )
                     except Exception as e:
@@ -576,7 +592,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
-            logging.info(f"Maintaining active {pos_info['side'].upper()} trade on {symbol}. Updating ratcheting Stop Loss @ ${sl_level:.2f}...")
+            logging.info(f"Maintaining active {pos_info['side'].upper()} trade on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             close_is_buy = (pos_info["side"] == "short")
             try:
                 run_sync_protection(
@@ -586,7 +602,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     avg_cost=latest_close,
                     entry_atr=0.0,
                     stop_loss_atr_mult=0.0,
-                    tiers_json="",
+                    tiers_json=tp_tiers_json,
                     stop_loss_oid="",
                     tp_oids_json="",
                     tp_armed_tiers_json="",
