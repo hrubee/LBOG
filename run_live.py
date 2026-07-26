@@ -423,7 +423,7 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
         pass
 
     raw_size_coin = risk_amount / risk_distance
-    # Cap notional size to 98% of available free margin * max_leverage (20.0x)
+    # Cap notional size to 98% of available free margin * max_leverage (2.0x)
     max_notional = (avail_margin * 0.98) * max_leverage
     max_size_cap = max_notional / entry_price if entry_price > 0 else 0.0
 
@@ -563,10 +563,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     else:
         logging.info(f"Account Position State ({symbol}): active=False (Flat)")
 
-    # Calculate 3% risk-based position size if entering a new trade (20x leverage capacity)
+    # Calculate 3% risk-based position size if entering a new trade (2x leverage capacity)
     trade_size = get_minimum_trade_size(symbol)
     if sl_level > 0:
-        trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=20.0)
+        trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=2.0)
     
     # Pure 3LB Trend Trailing Exit Architecture:
     # No static TP orders placed on exchange — trades run indefinitely during trends
@@ -697,10 +697,10 @@ def main():
     for sym in SYMBOLS:
         try:
             pair = adapter._format_symbol(sym, INST_TYPE)
-            adapter._exchange.set_leverage(20, pair)
-            logging.info(f"Set Exchange Leverage to 20x for {sym} ({pair}).")
+            adapter._exchange.set_leverage(2, pair)
+            logging.info(f"Set Exchange Leverage to 2x for {sym} ({pair}).")
         except Exception as lev_err:
-            logging.warning(f"Could not set leverage to 20x on Delta for {sym}: {lev_err}")
+            logging.warning(f"Could not set leverage to 2x on Delta for {sym}: {lev_err}")
 
     seed_historical_fill_ids(adapter, SYMBOLS)
     logging.info(f"Starting continuous multi-asset loop for {', '.join(SYMBOLS)} on {TIMEFRAME} chart (polling every {LOOP_INTERVAL}s)... Press Ctrl+C to stop.")
