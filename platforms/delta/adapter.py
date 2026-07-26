@@ -23,6 +23,17 @@ import ccxt
 import pandas as pd
 
 
+class BalanceUnavailable(RuntimeError):
+    """
+    Raised when a live account balance cannot be determined.
+
+    Never substitute a placeholder number here. Position sizing divides risk
+    capital by the stop distance, so a fabricated balance produces a real order
+    at the wrong size — silently, with no error anywhere. Failing loudly means
+    the cycle skips the trade, which is the correct outcome.
+    """
+
+
 class DeltaExchangeAdapter:
     """
     Exchange adapter for Delta Exchange — spot and perpetual futures.
@@ -89,28 +100,41 @@ class DeltaExchangeAdapter:
     def name(self) -> str:
         return "delta"
 
+    PAPER_BALANCE = 1000.0  # simulated collateral, paper mode only
+
     def get_wallet_balance(self, quote: str = "USDT") -> float:
-        """Fetch total wallet collateral balance in USDT or USD."""
+        """
+        Fetch total wallet collateral balance in USDT or USD.
+
+        Raises BalanceUnavailable if the account cannot be read or carries no
+        recognizable collateral. Callers must treat that as "do not trade this
+        cycle" rather than sizing off a default.
+        """
         if not self._is_live:
-            return 1000.0
+            return self.PAPER_BALANCE
         try:
             bal = self._exchange.fetch_balance()
-            total_dict = bal.get("total", {})
-            if quote in total_dict and total_dict[quote]:
-                return float(total_dict[quote])
-            if "USD" in total_dict and total_dict["USD"]:
-                return float(total_dict["USD"])
-            if "BTC" in total_dict and total_dict["BTC"]:
-                # Convert BTC to USDT
-                btc_price = self.get_spot_price("BTC")
-                return float(total_dict["BTC"]) * btc_price
-            free_dict = bal.get("free", {})
-            for k in ("USDT", "USD", "DETO"):
-                if k in free_dict and free_dict[k]:
-                    return float(free_dict[k])
         except Exception as e:
-            print(f"Error fetching wallet balance: {e}", file=sys.stderr)
-        return 1000.0
+            raise BalanceUnavailable(f"could not fetch Delta wallet balance: {e}") from e
+
+        total_dict = bal.get("total", {})
+        if quote in total_dict and total_dict[quote]:
+            return float(total_dict[quote])
+        if "USD" in total_dict and total_dict["USD"]:
+            return float(total_dict["USD"])
+        if "BTC" in total_dict and total_dict["BTC"]:
+            # Convert BTC collateral to USDT
+            btc_price = self.get_spot_price("BTC")
+            if btc_price > 0:
+                return float(total_dict["BTC"]) * btc_price
+            raise BalanceUnavailable("BTC collateral found but BTC spot price unavailable")
+        free_dict = bal.get("free", {})
+        for k in ("USDT", "USD", "DETO"):
+            if k in free_dict and free_dict[k]:
+                return float(free_dict[k])
+        raise BalanceUnavailable(
+            f"no recognizable collateral in Delta balance (total keys: {sorted(total_dict)})"
+        )
 
     # ─────────────────────────────────────────────
     # Market data
@@ -561,14 +585,26 @@ class DeltaExchangeAdapter:
         return out
 
     def get_account_balance(self, inst_type: str = "spot") -> float:
-        """Return total USDT-denominated account value."""
+        """
+        Return total USDT-denominated account value.
+
+        Raises BalanceUnavailable rather than returning 0.0 on an unreadable
+        balance — a zero would read as a real (empty) account downstream.
+        """
         if not self._is_live:
-            return 1000.0
-            
+            return self.PAPER_BALANCE
+
         params = {"type": "future"} if inst_type == "futures" else {}
-        bal = self._exchange.fetch_balance(params=params)
-        total = bal.get("total") or {}
         try:
-            return float(total.get("USDT") or total.get("USD") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+            bal = self._exchange.fetch_balance(params=params)
+        except Exception as e:
+            raise BalanceUnavailable(f"could not fetch Delta account balance: {e}") from e
+
+        total = bal.get("total") or {}
+        raw = total.get("USDT") or total.get("USD")
+        try:
+            return float(raw)
+        except (TypeError, ValueError) as e:
+            raise BalanceUnavailable(
+                f"unreadable USDT/USD account balance: {raw!r} (total keys: {sorted(total)})"
+            ) from e

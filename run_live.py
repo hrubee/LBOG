@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.join(BASE_DIR, 'shared_strategies', 'open', 'lbog'))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
-from adapter import DeltaExchangeAdapter
-from lbog import linebreak
+from adapter import DeltaExchangeAdapter, BalanceUnavailable
+from lbog import linebreak, stop_levels, STOP_MODES
 from check_delta import _make_dataframe, run_sync_protection
 
 # Configure logging
@@ -45,6 +45,11 @@ parser.add_argument("--symbols", type=str, default="BTC", help="Comma-separated 
 parser.add_argument("--timeframe", type=str, default="5m", help="Candle timeframe (default: 5m)")
 parser.add_argument("--size", type=float, default=0.001, help="Default fallback position size in coin units (default: 0.001)")
 parser.add_argument("--interval", type=int, default=10, help="Loop sleep interval in seconds (default: 10)")
+parser.add_argument(
+    "--stop-mode", type=str, default="prev_candle", choices=STOP_MODES,
+    help="Trailing stop rule: prev_candle = previous candle's low/high (tight, exits trends in ~3 bars); "
+         "brick = 3LB structural reversal level (wider, holds trends). Default: prev_candle"
+)
 args = parser.parse_args()
 
 SYMBOLS = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -52,6 +57,8 @@ TIMEFRAME = args.timeframe
 INST_TYPE = "futures"
 POSITION_SIZE = args.size
 LOOP_INTERVAL = args.interval
+STOP_MODE = args.stop_mode
+LB_DEPTH = 3
 
 FITS_LOG_FILE = os.path.join(BASE_DIR, 'wallet_trades.log')
 FITS_JSON_FILE = os.path.join(BASE_DIR, 'wallet_fills.json')
@@ -399,9 +406,13 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
     return {"active": False, "side": "flat", "size": 0.0, "entry_price": 0.0, "unrealized_pnl": 0.0, "pnl_pct": 0.0, "raw": None}
 
 
-def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 20.0) -> float:
+def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 2.0) -> float:
     """
-    Calculate position size strictly based on 3% wallet risk per trade using full leverage capacity (20x max leverage cap).
+    Calculate position size strictly based on 3% wallet risk per trade, capped by
+    notional leverage.
+
+    Propagates BalanceUnavailable — the caller must skip the trade rather than
+    size off a placeholder balance.
     """
     wallet_balance = adapter.get_wallet_balance()
     risk_amount = wallet_balance * 0.03  # 3% risk of wallet size
@@ -412,15 +423,18 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
     if risk_distance <= 0 or entry_price <= 0:
         return min_size
 
-    # Fetch available free margin to prevent 'insufficient_margin' when multiple assets trade simultaneously
+    # Fetch available free margin to prevent 'insufficient_margin' when multiple
+    # assets trade simultaneously. This only tightens the notional cap, so
+    # falling back to the total balance is safe — but say so rather than passing
+    # silently, since a persistent failure means the cap is looser than intended.
     avail_margin = wallet_balance
     try:
         bal_info = adapter._exchange.fetch_balance()
         free_bal = float(bal_info.get("free", {}).get("USD") or bal_info.get("USD", {}).get("free") or 0.0)
         if free_bal > 0:
             avail_margin = free_bal
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Free-margin lookup failed for {symbol}; capping against total balance instead: {e}")
 
     raw_size_coin = risk_amount / risk_distance
     # Cap notional size to 98% of available free margin * max_leverage (2.0x)
@@ -461,6 +475,15 @@ def load_candle_tracker():
                 LAST_PROCESSED_CANDLE_TIME = data.get("processed", {})
                 LAST_STOPPED_CANDLE_TIME = data.get("stopped", {})
                 ACTIVE_SL = data.get("active_sl", {})
+                # A ratchet carried over from a different stop rule is not
+                # comparable to levels the new rule produces — drop it so the
+                # next cycle re-seeds cleanly instead of inheriting a stale level.
+                if data.get("active_sl_mode") not in (None, STOP_MODE) and ACTIVE_SL:
+                    logging.warning(
+                        f"stop-mode changed to {STOP_MODE!r} (was {data.get('active_sl_mode')!r}); "
+                        f"discarding carried-over stop levels {ACTIVE_SL}"
+                    )
+                    ACTIVE_SL = {}
         except Exception:
             pass
 
@@ -471,7 +494,8 @@ def save_candle_tracker():
             json.dump({
                 "processed": LAST_PROCESSED_CANDLE_TIME,
                 "stopped": LAST_STOPPED_CANDLE_TIME,
-                "active_sl": ACTIVE_SL
+                "active_sl": ACTIVE_SL,
+                "active_sl_mode": STOP_MODE
             }, f, indent=2)
     except Exception:
         pass
@@ -480,19 +504,22 @@ def save_candle_tracker():
 load_candle_tracker()
 
 
-def ratchet_stop(symbol: str, side: str, prev_candle_low: float, prev_candle_high: float) -> float:
+def ratchet_stop(symbol: str, side: str, long_stop: float, short_stop: float) -> float:
     """
-    Move the stop to the previous candle's low (long) / high (short), tighter only.
+    Move the stop toward price, tighter only — never loosens.
 
-    On a cold start with no stored level this seeds from the current previous
-    candle, which is exactly the rule for a fresh entry and self-corrects for a
-    position resumed mid-trend (it can only tighten from there).
+    `long_stop` / `short_stop` come from the active stop_mode (see
+    lbog.stop_levels), so this function is rule-agnostic.
+
+    On a cold start with no stored level this seeds from the current candidate,
+    which is exactly the rule for a fresh entry and self-corrects for a position
+    resumed mid-trend (it can only tighten from there).
     """
     prev = float(ACTIVE_SL.get(symbol) or 0.0)
     if side == "long":
-        level = max(prev, prev_candle_low) if prev > 0 else prev_candle_low
+        level = max(prev, long_stop) if prev > 0 else long_stop
     else:
-        level = min(prev, prev_candle_high) if prev > 0 else prev_candle_high
+        level = min(prev, short_stop) if prev > 0 else short_stop
     if ACTIVE_SL.get(symbol) != level:
         ACTIVE_SL[symbol] = level
         save_candle_tracker()
@@ -534,14 +561,17 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # 2. 3LB brick structure from CLOSED candles only. Line break bricks never
     #    repaint, so a brick whose idx is the last closed bar is the
     #    "permanently painted" entry event we are allowed to act on.
-    lb_lines = linebreak(df['close'].values, n=3)
+    lb_lines = linebreak(df['close'].values, n=LB_DEPTH)
     last_brick = lb_lines[-1]
     brick_printed_now = (last_brick["idx"] == len(df) - 1 and last_brick["dir"] != 0)
     lb_dir = int(last_brick["dir"])
 
-    # "Previous candle" for the bar currently forming = the last CLOSED candle.
-    prev_candle_low = float(df["low"].iloc[-1])
-    prev_candle_high = float(df["high"].iloc[-1])
+    # Stop candidates for the bar currently forming. Index len(df) is that bar,
+    # so stop_levels reads bar len(df)-1 — the last CLOSED candle — exactly as
+    # lbog_core does one bar earlier in a backtest. Same rule, same code path.
+    long_stop, short_stop = stop_levels(
+        lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, STOP_MODE
+    )
 
     # Entry signal: a brick printed on a closed candle we have not acted on yet.
     # There is deliberately no mid-candle price-crossing trigger — the candle
@@ -551,7 +581,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # Check account's active position on Delta Exchange first
     pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
 
-    # 3. Stop loss = previous candle's low (long) / high (short), tighter only.
+    # 3. Stop loss per the active stop_mode, ratcheting tighter only.
     if sig != 0:
         target_side = "long" if sig == 1 else "short"
     elif pos_info["active"]:
@@ -567,13 +597,14 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         # position in the same direction keeps ratcheting from where it was.
         if not (pos_info["active"] and pos_info["side"] == target_side):
             clear_stop(symbol)
-        sl_level = ratchet_stop(symbol, target_side, prev_candle_low, prev_candle_high)
+        sl_level = ratchet_stop(symbol, target_side, long_stop, short_stop)
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
     sync_real_wallet_fills(adapter, symbol, df=df, sl_level=sl_level)
 
     logging.info(
-        f"Live Price ({symbol}): ${current_live_price:.2f} | Prev Candle L/H: ${prev_candle_low:.2f} / ${prev_candle_high:.2f} | "
+        f"Live Price ({symbol}): ${current_live_price:.2f} | Stop Mode: {STOP_MODE} | "
+        f"Long/Short Stop Candidate: ${long_stop:.2f} / ${short_stop:.2f} | "
         f"3LB Trend: {lb_dir} | Brick Painted This Candle: {brick_printed_now} | Fresh Candle: {is_fresh_candle_close} | "
         f"Signal: {sig} | SL: ${sl_level:.2f}"
     )
@@ -588,11 +619,21 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     else:
         logging.info(f"Account Position State ({symbol}): active=False (Flat)")
 
-    # Calculate 3% risk-based position size if entering a new trade (2x leverage capacity)
-    trade_size = get_minimum_trade_size(symbol)
-    if sl_level > 0:
-        trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=2.0)
-    
+    # Calculate 3% risk-based position size — only when actually opening a trade.
+    # A balance lookup failure must block the entry, NOT abort the cycle, because
+    # the stop-loss sync for an already-open position runs further down.
+    trade_size = 0.0
+    size_error = ""
+    opening_new_trade = (
+        sig != 0 and not (pos_info["active"] and pos_info["side"] == ("long" if sig == 1 else "short"))
+    )
+    if opening_new_trade and sl_level > 0:
+        try:
+            trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=2.0)
+        except BalanceUnavailable as e:
+            size_error = str(e)
+            logging.error(f"Cannot size {symbol} position — refusing to open a trade this cycle: {e}")
+
     # Pure 3LB Trend Trailing Exit Architecture:
     # No static TP orders placed on exchange — trades run indefinitely during trends
     # and exit ONLY when a true 3LB trend reversal brick prints or structural SL is hit.
@@ -607,9 +648,9 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     should_enter_short = (sig == -1)
 
     if should_enter_long:
-        LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
-        save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "long":
+            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+            save_candle_tracker()
             logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
                 run_sync_protection(
@@ -619,7 +660,16 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 )
             except Exception as e:
                 logging.error(f"Error syncing protection for LONG position: {e}")
+        elif trade_size <= 0:
+            # Deliberately leave the candle unprocessed so the next poll retries
+            # once the balance is readable again.
+            logging.error(
+                f"Skipping LONG entry on {symbol}: no valid position size "
+                f"({size_error or 'size resolved to 0'})."
+            )
         else:
+            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+            save_candle_tracker()
             IS_ORDER_IN_FLIGHT[symbol] = True
             try:
                 if pos_info["active"] and pos_info["side"] == "short":
@@ -644,9 +694,9 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 IS_ORDER_IN_FLIGHT[symbol] = False
 
     elif should_enter_short:
-        LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
-        save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "short":
+            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+            save_candle_tracker()
             logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
                 run_sync_protection(
@@ -656,7 +706,16 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 )
             except Exception as e:
                 logging.error(f"Error syncing protection for SHORT position: {e}")
+        elif trade_size <= 0:
+            # Deliberately leave the candle unprocessed so the next poll retries
+            # once the balance is readable again.
+            logging.error(
+                f"Skipping SHORT entry on {symbol}: no valid position size "
+                f"({size_error or 'size resolved to 0'})."
+            )
         else:
+            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+            save_candle_tracker()
             IS_ORDER_IN_FLIGHT[symbol] = True
             try:
                 if pos_info["active"] and pos_info["side"] == "long":
@@ -708,6 +767,10 @@ def main():
     mode_name = "REAL Production API" if is_real else "Demo Account Paper Mode"
     logging.info("=" * 65)
     logging.info(f"Starting LBOG Live Execution Daemon ({mode_name})")
+    logging.info(
+        f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE} "
+        f"({'previous candle low/high' if STOP_MODE == 'prev_candle' else '3LB structural reversal level'})"
+    )
     logging.info("=" * 65)
     
     adapter = DeltaExchangeAdapter()

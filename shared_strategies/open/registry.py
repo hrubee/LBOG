@@ -1012,8 +1012,9 @@ def vwap_rejection_st_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:
 
 @register(
     "lbog",
-    "LBOG (Line Break Original) \u2014 trend-following strategy with ratcheting previous-candle stop loss",
-    {"n": 3},
+    "LBOG (Line Break Original) \u2014 close-confirmed 3LB entries with a ratcheting stop; "
+    "stop_mode selects the previous-candle low/high or the 3LB structural level",
+    {"n": 3, "stop_mode": "prev_candle"},
     platforms=("spot", "futures"),
 )
 def lbog_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:

@@ -12,7 +12,7 @@ _PARENT_DIR = os.path.dirname(_THIS_DIR)
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 
-from lbog.lbog import linebreak, lbog_core
+from lbog.lbog import linebreak, lbog_core, STOP_MODES
 
 
 # ─── Helpers ────────────────────────────────
@@ -182,6 +182,65 @@ def test_lbog_opposite_brick_flip():
     assert result["position"].iloc[2] == -1
     assert result["signal"].iloc[2] == -1  # Flip signal (sell/short entry)
     assert result["sl_level"].iloc[2] == 12.0
+
+
+def test_stop_mode_brick_uses_structural_level():
+    """stop_mode='brick' must trail the 3LB reversal level, not the candle low."""
+    closes = [10.0, 11.0, 12.0, 13.0]
+    lows = [9.0, 10.0, 11.5, 12.2]
+    df = make_ohlcv(closes, lows=lows)
+
+    brick = lbog_core(df, n=3, stop_mode="brick")
+    prev = lbog_core(df, n=3, stop_mode="prev_candle")
+
+    # Bricks are [10,11], [11,12], [12,13]; the n=3 structural floor stays at
+    # the lowest brick bottom, so the brick stop is looser than the candle stop.
+    assert brick["position"].iloc[3] == 1
+    assert brick["sl_level"].iloc[3] == 10.0
+    assert prev["sl_level"].iloc[3] == 11.5
+    assert brick["sl_level"].iloc[3] < prev["sl_level"].iloc[3]
+
+
+def test_stop_mode_brick_holds_trade_that_prev_candle_stops_out():
+    """The two modes must actually diverge in outcome, not just in level."""
+    # A pullback that dips under the previous candle's low but stays above the
+    # 3LB structural floor: prev_candle exits, brick stays in.
+    closes = [10.0, 11.0, 12.0, 12.5]
+    lows = [9.0, 10.0, 11.5, 11.0]   # low[3]=11.0 < prev_candle stop 11.5, > brick stop 10.0
+    df = make_ohlcv(closes, lows=lows)
+
+    assert lbog_core(df, n=3, stop_mode="prev_candle")["position"].iloc[3] == 0
+    assert lbog_core(df, n=3, stop_mode="brick")["position"].iloc[3] == 1
+
+
+def test_stop_mode_short_ratchets_in_both_modes():
+    """
+    Neither mode may leave a short stop pinned at its widest level — this is the
+    regression that 03806db introduced by using max() on falling brick tops.
+    Highs stay strictly under both stop levels so the short survives to bar 3.
+    """
+    closes = [10.0, 9.0, 8.0, 7.0]
+    highs = [12.0, 9.5, 8.8, 7.5]
+    lows = [9.0, 8.0, 7.0, 6.0]
+    df = make_ohlcv(closes, highs=highs, lows=lows)
+
+    for mode in STOP_MODES:
+        r = lbog_core(df, n=1, stop_mode=mode)
+        seg = [r["sl_level"].iloc[i] for i in (1, 2, 3)]
+        assert all(r["position"].iloc[i] == -1 for i in (1, 2, 3)), \
+            f"{mode}: short did not survive to bar 3, positions={list(r['position'])}"
+        assert seg[0] > seg[1] > seg[2], f"{mode}: short stop failed to ratchet down {seg}"
+
+
+def test_stop_mode_rejects_unknown_value():
+    """An unrecognized stop_mode must fail loudly, not silently pick a default."""
+    df = make_ohlcv([10.0, 11.0, 12.0])
+    try:
+        lbog_core(df, n=3, stop_mode="trailing_atr")
+    except ValueError as e:
+        assert "trailing_atr" in str(e)
+    else:
+        raise AssertionError("expected ValueError for unknown stop_mode")
 
 
 if __name__ == "__main__":

@@ -36,22 +36,57 @@ def linebreak(close: np.ndarray, n: int = 3) -> list[dict]:
     return lines
 
 
+STOP_MODES = ("prev_candle", "brick")
+
+
+def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: str) -> tuple[float, float]:
+    """
+    Return (long_stop, short_stop) — the stop levels in force while bar `i` trades.
+
+    prev_candle : the previous candle's low / high. Tight; exits a trend after a
+                  couple of bars on any timeframe, because ordinary pullback
+                  noise routinely breaks the prior bar's extreme.
+    brick       : the 3LB structural reversal level (lowest bottom / highest top
+                  of the last `n` bricks) — i.e. the price at which the line
+                  break chart would flip. Wider, holds trends far longer.
+
+    Both read only closed data (bar i-1 and earlier), so neither look-aheads.
+    """
+    if stop_mode == "prev_candle":
+        return float(low[i - 1]), float(high[i - 1])
+    if stop_mode == "brick":
+        last_n = active_lines[-n:] if len(active_lines) >= n else active_lines
+        return (
+            float(min(x["bot"] for x in last_n)),
+            float(max(x["top"] for x in last_n)),
+        )
+    raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
+
+
 def lbog_core(
     df: pd.DataFrame,
     n: int = 3,
+    stop_mode: str = "prev_candle",
 ) -> pd.DataFrame:
     """
     Generate LBOG (Line Break Original) trend-following signals with 3-Line-Break (3LB).
+
+    Entry is close-confirmed: a position opens only on the bar whose close
+    permanently paints a new line break brick.
 
     Parameters
     ----------
     df : DataFrame with open, high, low, close columns
     n : lookback depth for the line break chart reversal (default 3)
+    stop_mode : "prev_candle" (default) trails the previous candle's low/high;
+                "brick" trails the 3LB structural reversal level. See stop_levels.
 
     Returns
     -------
     DataFrame with columns: signal, position, sl_level, lb_dir
     """
+    if stop_mode not in STOP_MODES:
+        raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
     result = pd.DataFrame(index=df.index)
     close = df["close"].values
     high = df["high"].values
@@ -91,11 +126,8 @@ def lbog_core(
         bd = last_brick["dir"]
         brick_dir[i] = bd
         
-        # "Previous candle" relative to bar i — the stop level in force while
-        # bar i trades. low[i - 1] / high[i - 1] are already closed and known
-        # before bar i opens, so there is no look-ahead here.
-        prev_low = float(low[i - 1])
-        prev_high = float(high[i - 1])
+        # Stop levels in force while bar i trades, per the selected stop_mode.
+        long_stop, short_stop = stop_levels(active_lines, low, high, i, n, stop_mode)
 
         # A brick only counts as an entry trigger on the bar that printed it.
         # Line break bricks never repaint, so this is the "permanently painted"
@@ -103,39 +135,38 @@ def lbog_core(
         brick_printed_now = (last_brick["idx"] == i)
 
         if pos == 0:
-            # Fresh entry. SL starts at the candle before the signal candle.
-            # No same-bar stop test: live, the order is placed at the signal
-            # candle's close, so that bar's range is already history.
+            # Fresh entry. No same-bar stop test: live, the order is placed at
+            # the signal candle's close, so that bar's range is already history.
             if brick_printed_now and bd == 1:
                 pos = 1
-                curr_sl = prev_low
+                curr_sl = long_stop
             elif brick_printed_now and bd == -1:
                 pos = -1
-                curr_sl = prev_high
+                curr_sl = short_stop
 
         elif pos == 1:
-            # Ratchet SL up to the previous candle's low (never loosens), then
-            # test whether this bar's low took it out. The resting exchange stop
-            # fires intrabar, so it is checked before the close-based flip.
-            curr_sl = max(curr_sl, prev_low) if curr_sl > 0.0 else prev_low
+            # Ratchet SL up (never loosens), then test whether this bar's low
+            # took it out. The resting exchange stop fires intrabar, so it is
+            # checked before the close-based brick flip.
+            curr_sl = max(curr_sl, long_stop) if curr_sl > 0.0 else long_stop
             if low[i] <= curr_sl:
                 pos = 0
                 curr_sl = 0.0
             if brick_printed_now and bd == -1:
                 # Red brick printed -> short, whether or not the stop just hit
                 pos = -1
-                curr_sl = prev_high
+                curr_sl = short_stop
 
         elif pos == -1:
-            # Ratchet SL down to the previous candle's high (never loosens).
-            curr_sl = min(curr_sl, prev_high) if curr_sl > 0.0 else prev_high
+            # Ratchet SL down (never loosens).
+            curr_sl = min(curr_sl, short_stop) if curr_sl > 0.0 else short_stop
             if high[i] >= curr_sl:
                 pos = 0
                 curr_sl = 0.0
             if brick_printed_now and bd == 1:
                 # Green brick printed -> long, whether or not the stop just hit
                 pos = 1
-                curr_sl = prev_low
+                curr_sl = long_stop
 
         position[i] = pos
         sl[i] = curr_sl
@@ -158,6 +189,6 @@ def lbog_core(
     return result
 
 
-def lbog_strategy(df: pd.DataFrame, n: int = 3, **kwargs) -> pd.DataFrame:
+def lbog_strategy(df: pd.DataFrame, n: int = 3, stop_mode: str = "prev_candle", **kwargs) -> pd.DataFrame:
     """Strategy wrapper entry-point for open strategy registry."""
-    return lbog_core(df, n=n)
+    return lbog_core(df, n=n, stop_mode=stop_mode)
