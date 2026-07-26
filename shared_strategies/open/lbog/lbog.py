@@ -39,6 +39,23 @@ def linebreak(close: np.ndarray, n: int = 3) -> list[dict]:
 STOP_MODES = ("prev_candle", "brick")
 
 
+def stop_breached(side: str, stop: float, price: float) -> bool:
+    """
+    True when `price` has already traded through `stop` for a position on `side`.
+
+    The live mirror of the intrabar test in lbog_core (`low[i] <= curr_sl` for a
+    long). It exists because a breached stop CANNOT be placed as a resting stop
+    order: an exchange reads a sell order below market as a stop but a sell above
+    market as a take-profit, so submitting one silently converts the protective
+    order into a profit target and leaves the position naked. When this returns
+    True the only correct action is to close the position — the exit condition is
+    already satisfied.
+    """
+    if stop <= 0 or price <= 0:
+        return False
+    return price <= stop if side == "long" else price >= stop
+
+
 def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: str,
                 stop_lookback: int = 2) -> tuple[float, float]:
     """

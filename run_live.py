@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 from adapter import DeltaExchangeAdapter, BalanceUnavailable
-from lbog import linebreak, stop_levels, STOP_MODES
+from lbog import linebreak, stop_levels, stop_breached, STOP_MODES
 from check_delta import _make_dataframe, run_sync_protection
 
 # Configure logging
@@ -56,6 +56,16 @@ parser.add_argument(
          "immediately before the forming one (tightest); 2 = the one before that, "
          "lagging by an extra bar. Default: 2"
 )
+parser.add_argument(
+    "--risk-pct", type=float, default=1.0,
+    help="Percent of wallet risked per trade (default: 1.0). Measured max drawdown on the "
+         "4h n8 universe: 0.5%%->30%%, 1%%->51%%, 2%%->77%%, 3%%->92%%."
+)
+parser.add_argument(
+    "--lb-depth", type=int, default=3,
+    help="Line-break depth N for the NLB chart (default: 3). Higher = fewer, larger swings; "
+         "8 was the best-measured setting on 4h."
+)
 args = parser.parse_args()
 
 SYMBOLS = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -67,7 +77,12 @@ STOP_MODE = args.stop_mode
 STOP_LOOKBACK = args.stop_lookback
 if STOP_LOOKBACK < 1:
     parser.error("--stop-lookback must be >= 1")
-LB_DEPTH = 3
+RISK_PCT = args.risk_pct / 100.0
+if not 0 < RISK_PCT <= 0.10:
+    parser.error("--risk-pct must be between 0 and 10")
+LB_DEPTH = args.lb_depth
+if LB_DEPTH < 1:
+    parser.error("--lb-depth must be >= 1")
 
 FITS_LOG_FILE = os.path.join(BASE_DIR, 'wallet_trades.log')
 FITS_JSON_FILE = os.path.join(BASE_DIR, 'wallet_fills.json')
@@ -415,22 +430,31 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
     return {"active": False, "side": "flat", "size": 0.0, "entry_price": 0.0, "unrealized_pnl": 0.0, "pnl_pct": 0.0, "raw": None}
 
 
-def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 2.0) -> float:
+def calculate_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float,
+                        sl_price: float, risk_pct: float = 0.01, max_leverage: float = 2.0) -> float:
     """
-    Calculate position size strictly based on 3% wallet risk per trade, capped by
-    notional leverage.
+    Position size from a fixed fractional risk budget, capped by notional leverage.
+
+    Returns 0.0 — meaning DO NOT TRADE — when the exchange minimum contract would
+    risk more than the budget allows. The previous behaviour floored *up* to the
+    minimum, silently abandoning the risk cap: on a small wallet that turns a 1%
+    rule into 5% or more without any log line saying so. Refusing the trade is
+    the correct outcome; the account is simply too small for that instrument.
 
     Propagates BalanceUnavailable — the caller must skip the trade rather than
     size off a placeholder balance.
     """
     wallet_balance = adapter.get_wallet_balance()
-    risk_amount = wallet_balance * 0.03  # 3% risk of wallet size
+    risk_amount = wallet_balance * risk_pct
     risk_distance = abs(entry_price - sl_price)
 
-    min_size = get_minimum_trade_size(symbol)
+    min_size = get_minimum_trade_size(symbol, adapter)
 
     if risk_distance <= 0 or entry_price <= 0:
-        return min_size
+        logging.error(
+            f"Cannot size {symbol}: risk distance {risk_distance} / entry {entry_price} invalid."
+        )
+        return 0.0
 
     # Fetch available free margin to prevent 'insufficient_margin' when multiple
     # assets trade simultaneously. This only tightens the notional cap, so
@@ -454,15 +478,46 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
     floored_size = adapter.floor_size(symbol, final_size_coin)
 
     logging.info(
-        f"Lot Sizing [{symbol} 3% Risk + {max_leverage:.0f}x Leverage Cap]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
-        f"3% Risk = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin:.4f} {symbol}"
+        f"Lot Sizing [{symbol} {100*risk_pct:.2f}% Risk + {max_leverage:.0f}x Leverage Cap]: "
+        f"Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
+        f"Risk Budget = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | "
+        f"Raw Size = {raw_size_coin:.6f} {symbol} | Capped Size = {final_size_coin:.6f} {symbol} | "
+        f"Min Contract = {min_size} {symbol}"
     )
 
-    return floored_size if floored_size >= min_size else min_size
+    if floored_size >= min_size:
+        return floored_size
+
+    # Below one contract. Taking the minimum anyway would breach the risk budget —
+    # say so and decline rather than quietly over-risking the account.
+    min_risk = min_size * risk_distance
+    logging.error(
+        f"REFUSING {symbol} trade: risk budget ${risk_amount:.2f} allows {final_size_coin:.6f} "
+        f"{symbol}, but the exchange minimum is {min_size} {symbol} which would risk "
+        f"${min_risk:.2f} ({100*min_risk/wallet_balance:.1f}% of the ${wallet_balance:.2f} wallet, "
+        f"budget is {100*risk_pct:.2f}%). Wallet too small for this instrument."
+    )
+    return 0.0
 
 
-def get_minimum_trade_size(symbol: str) -> float:
-    """Return exchange-compliant minimum trade size in coin units."""
+def get_minimum_trade_size(symbol: str, adapter: DeltaExchangeAdapter = None) -> float:
+    """
+    Smallest tradeable size in coin units — one contract.
+
+    Read it from the exchange rather than hardcoding: Delta's contract sizes vary
+    by orders of magnitude (BTC 0.001, ETH 0.01, SOL/XRP/ADA 1.0, DOGE 100), so a
+    BTC-shaped guess understates DOGE by 100,000x and would silently size every
+    altcoin order wrong.
+    """
+    if adapter is not None:
+        try:
+            adapter._load_markets()
+            market = adapter._exchange.market(adapter._format_symbol(symbol, INST_TYPE))
+            cs = float(market.get("contractSize") or 0)
+            if cs > 0:
+                return cs
+        except Exception as e:
+            logging.warning(f"Could not read contract size for {symbol}, falling back: {e}")
     return 0.01 if symbol.upper() == "ETH" else 0.001
 
 
@@ -543,6 +598,50 @@ def clear_stop(symbol: str):
     if symbol in ACTIVE_SL:
         ACTIVE_SL.pop(symbol, None)
         save_candle_tracker()
+
+
+def verify_protection(adapter: DeltaExchangeAdapter, symbol: str, pos_info: dict, sl_level: float) -> bool:
+    """
+    Confirm a protective order is actually resting for an open position.
+
+    run_sync_protection reports failures by printing a JSON field to stdout, which
+    never reaches this log — so a rejected stop looked identical to a placed one
+    and positions ran naked while the log said "Syncing SL @ ...". Read the real
+    order book back and say so loudly when nothing is there.
+    """
+    if not pos_info.get("active"):
+        return True
+    try:
+        resting = adapter.list_open_stop_orders(symbol, INST_TYPE)
+    except Exception as e:
+        logging.error(f"PROTECTION UNVERIFIED for {symbol}: could not read stop orders: {e}")
+        return False
+    close_side = "buy" if pos_info["side"] == "short" else "sell"
+    guards = [o for o in resting if o.get("side") == close_side and o.get("trigger_price")]
+    if guards:
+        levels = ", ".join(f"${o['trigger_price']:,.2f}" for o in guards)
+        logging.info(f"Protection verified for {symbol}: {len(guards)} resting order(s) @ {levels}")
+        return True
+    logging.error(
+        f"POSITION UNPROTECTED: {symbol} {pos_info['side'].upper()} size={pos_info['size']} "
+        f"has NO resting stop order on the exchange (intended SL ${sl_level:,.2f}). "
+        f"The sync call reported no error but nothing is protecting this position."
+    )
+    return False
+
+
+def close_position(adapter: DeltaExchangeAdapter, symbol: str, pos_info: dict, reason: str) -> bool:
+    """Flatten an open position reduce-only. Returns True if the close was submitted."""
+    is_buy = pos_info["side"] == "short"
+    try:
+        res = adapter.market_open(symbol, is_buy=is_buy, size=pos_info["size"],
+                                  inst_type=INST_TYPE, reduce_only=True)
+        logging.info(f"Closed {pos_info['side'].upper()} {symbol} ({reason}): {res}")
+        clear_stop(symbol)
+        return True
+    except Exception as e:
+        logging.error(f"FAILED to close {pos_info['side'].upper()} {symbol} ({reason}): {e}")
+        return False
 
 
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
@@ -632,6 +731,22 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     else:
         logging.info(f"Account Position State ({symbol}): active=False (Flat)")
 
+    # A stop that price has ALREADY traded through cannot be placed as a resting
+    # stop — the exchange would read it as a take-profit and leave the position
+    # naked. The exit condition is already satisfied, so close instead of syncing.
+    if pos_info["active"] and stop_breached(pos_info["side"], sl_level, current_live_price):
+        logging.warning(
+            f"STOP ALREADY BREACHED on {symbol}: {pos_info['side'].upper()} with SL "
+            f"${sl_level:,.2f} vs live ${current_live_price:,.2f}. Closing now rather "
+            f"than placing an order the exchange would treat as a take-profit."
+        )
+        IS_ORDER_IN_FLIGHT[symbol] = True
+        try:
+            close_position(adapter, symbol, pos_info, reason="stop already breached")
+        finally:
+            IS_ORDER_IN_FLIGHT[symbol] = False
+        return
+
     # Calculate 3% risk-based position size — only when actually opening a trade.
     # A balance lookup failure must block the entry, NOT abort the cycle, because
     # the stop-loss sync for an already-open position runs further down.
@@ -642,7 +757,8 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     )
     if opening_new_trade and sl_level > 0:
         try:
-            trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=2.0)
+            trade_size = calculate_risk_size(adapter, symbol, current_live_price, sl_level,
+                                             risk_pct=RISK_PCT, max_leverage=2.0)
         except BalanceUnavailable as e:
             size_error = str(e)
             logging.error(f"Cannot size {symbol} position — refusing to open a trade this cycle: {e}")
@@ -679,6 +795,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 )
             except Exception as e:
                 logging.error(f"Error syncing protection for LONG position: {e}")
+            verify_protection(adapter, symbol, pos_info, sl_level)
         elif trade_size <= 0:
             # Deliberately leave the candle unprocessed so the next poll retries
             # once the balance is readable again.
@@ -709,6 +826,8 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                         )
                     except Exception as e:
                         logging.error(f"Error placing initial SL for LONG: {e}")
+                    verify_protection(adapter, symbol,
+                                      {"active": True, "side": "long", "size": trade_size}, sl_level)
             finally:
                 IS_ORDER_IN_FLIGHT[symbol] = False
 
@@ -725,6 +844,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 )
             except Exception as e:
                 logging.error(f"Error syncing protection for SHORT position: {e}")
+            verify_protection(adapter, symbol, pos_info, sl_level)
         elif trade_size <= 0:
             # Deliberately leave the candle unprocessed so the next poll retries
             # once the balance is readable again.
@@ -755,6 +875,8 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                         )
                     except Exception as e:
                         logging.error(f"Error placing initial SL for SHORT: {e}")
+                    verify_protection(adapter, symbol,
+                                      {"active": True, "side": "short", "size": trade_size}, sl_level)
             finally:
                 IS_ORDER_IN_FLIGHT[symbol] = False
 
@@ -779,6 +901,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 )
             except Exception as e:
                 logging.error(f"Error updating stop loss for {symbol}: {e}")
+            verify_protection(adapter, symbol, pos_info, sl_level)
 
 
 def main():
@@ -790,6 +913,10 @@ def main():
         f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE}"
         + (f" (candle low/high {STOP_LOOKBACK} bar(s) back)" if STOP_MODE == "prev_candle"
            else " (3LB structural reversal level)")
+    )
+    logging.info(
+        f"Risk: {100*RISK_PCT:.2f}% of wallet per trade | Line-break depth: {LB_DEPTH} | "
+        f"Stop lookback: {STOP_LOOKBACK} bar(s)"
     )
     logging.info("Exits: ratcheting stop-loss + opposite-brick flip. No take-profit (by design).")
     logging.info("=" * 65)

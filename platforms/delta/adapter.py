@@ -211,16 +211,31 @@ class DeltaExchangeAdapter:
         return 0.0
 
     def get_perp_price(self, symbol: str) -> float:
-        """Get current last price for a perpetual swap (e.g. 'BTC') directly from Delta Exchange."""
+        """
+        Current price for a perpetual swap, from Delta.
+
+        Falls back through last -> mark -> mid, because a contract that has not
+        traded recently reports last=None. That is normal on testnet and on thin
+        mainnet contracts, and returning 0.0 there is dangerous: 0 silently
+        disables the sizing guard and makes market_stop_loss misclassify every
+        stop as a take-profit. Mark price is always published, so prefer it over
+        giving up.
+        """
         if not symbol:
             return 0.0
         pair = self._format_symbol(symbol, "futures")
         try:
             self._load_markets()
             ticker = self._exchange.fetch_ticker(pair)
-            price = ticker.get("last") or 0
-            if price and price > 0:
+            price = ticker.get("last")
+            if price and float(price) > 0:
                 return float(price)
+            mark = (ticker.get("info") or {}).get("mark_price")
+            if mark and float(mark) > 0:
+                return float(mark)
+            bid, ask = ticker.get("bid"), ticker.get("ask")
+            if bid and ask and float(bid) > 0 and float(ask) > 0:
+                return (float(bid) + float(ask)) / 2.0
         except Exception:
             pass
         return 0.0

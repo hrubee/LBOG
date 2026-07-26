@@ -12,7 +12,7 @@ _PARENT_DIR = os.path.dirname(_THIS_DIR)
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 
-from lbog.lbog import linebreak, lbog_core, STOP_MODES
+from lbog.lbog import linebreak, lbog_core, stop_breached, STOP_MODES
 
 
 # ─── Helpers ────────────────────────────────
@@ -269,6 +269,38 @@ def test_stop_mode_rejects_unknown_value():
         assert "trailing_atr" in str(e)
     else:
         raise AssertionError("expected ValueError for unknown stop_mode")
+
+
+def test_stop_breached_detects_unplaceable_stops():
+    """
+    A stop price has already traded through is unplaceable as a resting stop —
+    the exchange would classify it as a take-profit and leave the position naked.
+    """
+    # Long: price at or below the stop means it is already hit.
+    assert stop_breached("long", 100.0, 99.0) is True
+    assert stop_breached("long", 100.0, 100.0) is True
+    assert stop_breached("long", 100.0, 101.0) is False
+    # Short: price at or above the stop means it is already hit.
+    assert stop_breached("short", 100.0, 101.0) is True
+    assert stop_breached("short", 100.0, 100.0) is True
+    assert stop_breached("short", 100.0, 99.0) is False
+    # No stop set, or no price: nothing to breach.
+    assert stop_breached("long", 0.0, 99.0) is False
+    assert stop_breached("short", 100.0, 0.0) is False
+
+
+def test_stop_breached_matches_core_exit_condition():
+    """The live predicate must agree with the intrabar test lbog_core uses."""
+    closes = [10.0, 11.0, 12.0, 12.0]
+    lows = [9.0, 10.0, 11.5, 9.5]
+    df = make_ohlcv(closes, lows=lows)
+    r = lbog_core(df, n=3, stop_lookback=1)
+
+    # Bar 3 stops out in the core: SL trailed to low[2]=11.5 and low[3]=9.5 broke it.
+    assert r["position"].iloc[2] == 1
+    assert r["position"].iloc[3] == 0
+    # The live predicate reaches the same verdict from price vs level.
+    assert stop_breached("long", 11.5, 9.5) is True
 
 
 if __name__ == "__main__":
