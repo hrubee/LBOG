@@ -534,6 +534,9 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     new_green_brick = (current_live_price > green_trigger)
     new_red_brick = (current_live_price < red_trigger)
 
+    # Check account's active position on Delta Exchange first
+    pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
+
     if pos_info["active"] and pos_info["side"] == "short":
         # Dynamic 3LB Trailing SL: Trail SL downwards to green_trigger (top of active 3LB pattern)
         sl_level = min(sl_level if sl_level > 0 else green_trigger, green_trigger)
@@ -557,8 +560,6 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         f"3LB Trend: {lb_dir} | Signal: {sig} | Calculated SL: ${sl_level:.2f}"
     )
 
-    # 4. Check account's active position on Delta Exchange
-    pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
     if pos_info["active"]:
         pnl_str = f"+${pos_info['unrealized_pnl']:.2f}" if pos_info['unrealized_pnl'] >= 0 else f"-${abs(pos_info['unrealized_pnl']):.2f}"
         pct_str = f"+{pos_info['pnl_pct']:.2f}%" if pos_info['pnl_pct'] >= 0 else f"{pos_info['pnl_pct']:.2f}%"
