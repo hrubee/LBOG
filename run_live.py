@@ -786,12 +786,24 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         sig != 0 and not (pos_info["active"] and pos_info["side"] == ("long" if sig == 1 else "short"))
     )
     if opening_new_trade and sl_level > 0:
-        try:
-            trade_size = calculate_risk_size(adapter, symbol, current_live_price, sl_level,
-                                             risk_pct=RISK_PCT, max_leverage=2.0)
-        except BalanceUnavailable as e:
-            size_error = str(e)
-            logging.error(f"Cannot size {symbol} position — refusing to open a trade this cycle: {e}")
+        # Never open a position whose stop is ALREADY on the wrong side of price.
+        # stop_levels returns a historical candle extreme with no guarantee it sits
+        # protectively relative to the price we would actually fill at — for a
+        # short entered above a two-bar-old high, the "stop" is really a profit
+        # target. Such a position is born breached and gets closed on the next
+        # cycle, then reopened, churning fees every 10s for no price movement.
+        # The strategy would have exited it immediately, so do not take it.
+        if stop_breached(target_side, sl_level, current_live_price):
+            size_error = (f"stop ${sl_level:,.2f} is already on the wrong side of price "
+                          f"${current_live_price:,.2f} for a {target_side.upper()}")
+            logging.warning(f"Skipping {symbol} entry — {size_error}. Waiting for a valid stop.")
+        else:
+            try:
+                trade_size = calculate_risk_size(adapter, symbol, current_live_price, sl_level,
+                                                 risk_pct=RISK_PCT, max_leverage=2.0)
+            except BalanceUnavailable as e:
+                size_error = str(e)
+                logging.error(f"Cannot size {symbol} position — refusing to open a trade this cycle: {e}")
 
     # Exit architecture: no take-profit, by design (removed in 17b1234). A trade
     # ends when the ratcheting SL is hit, or when an opposite brick prints and the
