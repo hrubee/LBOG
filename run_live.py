@@ -390,9 +390,9 @@ def check_existing_position(adapter: DeltaExchangeAdapter, symbol: str, current_
     return {"active": False, "side": "flat", "size": 0.0, "entry_price": 0.0, "unrealized_pnl": 0.0, "pnl_pct": 0.0, "raw": None}
 
 
-def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 5.0) -> float:
+def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_price: float, sl_price: float, max_leverage: float = 20.0) -> float:
     """
-    Calculate position size based on 3% wallet risk per trade with 5x max leverage margin capping.
+    Calculate position size strictly based on 3% wallet risk per trade using full leverage capacity (20x max leverage cap).
     """
     wallet_balance = adapter.get_wallet_balance()
     risk_amount = wallet_balance * 0.03  # 3% risk of wallet size
@@ -414,7 +414,7 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
         pass
 
     raw_size_coin = risk_amount / risk_distance
-    # Cap notional size to 98% of available free margin * max_leverage (5.0x)
+    # Cap notional size to 98% of available free margin * max_leverage (20.0x)
     max_notional = (avail_margin * 0.98) * max_leverage
     max_size_cap = max_notional / entry_price if entry_price > 0 else 0.0
 
@@ -422,7 +422,7 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
     floored_size = adapter.floor_size(symbol, final_size_coin)
 
     logging.info(
-        f"Lot Sizing [{symbol} 3% Risk + {max_leverage:.0f}x Max Lev]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
+        f"Lot Sizing [{symbol} 3% Risk + {max_leverage:.0f}x Leverage Cap]: Total Bal = ${wallet_balance:.2f} | Avail Margin = ${avail_margin:.2f} | "
         f"3% Risk = ${risk_amount:.2f} | Risk Distance = ${risk_distance:.2f} | Raw Size = {raw_size_coin:.4f} {symbol} | Capped Size = {final_size_coin:.4f} {symbol}"
     )
 
@@ -491,10 +491,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     else:
         logging.info(f"Account Position State ({symbol}): active=False (Flat)")
 
-    # Calculate 3% risk-based position size if entering a new trade (capped at 5x max leverage)
+    # Calculate 3% risk-based position size if entering a new trade (20x leverage capacity)
     trade_size = get_minimum_trade_size(symbol)
     if sl_level > 0:
-        trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=5.0)
+        trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=20.0)
     
     # 1:2 Risk/Reward Take Profit (TP) Calculation
     risk_dist = abs(latest_close - sl_level) if sl_level > 0 else 30.0
@@ -626,6 +626,14 @@ def main():
         sys.exit(1)
 
     logging.info(f"Successfully connected to Delta Exchange {mode_name}.")
+    for sym in SYMBOLS:
+        try:
+            pair = adapter._format_symbol(sym, INST_TYPE)
+            adapter._exchange.set_leverage(20, pair)
+            logging.info(f"Set Exchange Leverage to 20x for {sym} ({pair}).")
+        except Exception as lev_err:
+            logging.warning(f"Could not set leverage to 20x on Delta for {sym}: {lev_err}")
+
     seed_historical_fill_ids(adapter, SYMBOLS)
     logging.info(f"Starting continuous multi-asset loop for {', '.join(SYMBOLS)} on {TIMEFRAME} chart (polling every {LOOP_INTERVAL}s)... Press Ctrl+C to stop.")
 
