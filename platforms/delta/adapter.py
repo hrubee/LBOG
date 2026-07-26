@@ -227,15 +227,21 @@ class DeltaExchangeAdapter:
         try:
             self._load_markets()
             ticker = self._exchange.fetch_ticker(pair)
-            price = ticker.get("last")
-            if price and float(price) > 0:
-                return float(price)
-            mark = (ticker.get("info") or {}).get("mark_price")
-            if mark and float(mark) > 0:
-                return float(mark)
+            info = ticker.get("info") or {}
+
+            mark = info.get("mark_price")
+            mark = float(mark) if mark and float(mark) > 0 else 0.0
+            if mark > 0:
+                return mark
+
+            # No mark: mid is next best, since it is quoted continuously.
             bid, ask = ticker.get("bid"), ticker.get("ask")
             if bid and ask and float(bid) > 0 and float(ask) > 0:
                 return (float(bid) + float(ask)) / 2.0
+
+            last = ticker.get("last")
+            if last and float(last) > 0:
+                return float(last)
         except Exception:
             pass
         return 0.0

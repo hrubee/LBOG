@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 from adapter import DeltaExchangeAdapter, BalanceUnavailable
-from lbog import linebreak, stop_levels, stop_breached, STOP_MODES
+from lbog import linebreak, lbog_core, stop_levels, stop_breached, STOP_MODES
 from check_delta import _make_dataframe, run_sync_protection
 
 # Configure logging
@@ -685,13 +685,43 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         STOP_LOOKBACK
     )
 
-    # Entry signal: a brick printed on a closed candle we have not acted on yet.
-    # There is deliberately no mid-candle price-crossing trigger — the candle
-    # must be closed and the brick permanently painted.
-    sig = lb_dir if (brick_printed_now and is_fresh_candle_close) else 0
+    # Reconcile to the strategy's TARGET POSITION rather than reacting to a brick
+    # print. A brick is only "on the last closed bar" for one candle, so an
+    # event-driven entry is lost forever if the daemon restarts, the API hiccups,
+    # or the entry is refused during that single window — and at 4h/n8 the next
+    # brick can be weeks away. lbog_core holds a position, so ask it what we
+    # should be holding and make the exchange match. Self-healing, and it makes
+    # the runner and the backtest the same computation instead of two that agree
+    # only when nothing goes wrong.
+    core = lbog_core(df, n=LB_DEPTH, stop_mode=STOP_MODE, stop_lookback=STOP_LOOKBACK)
+    target_pos = int(core["position"].iloc[-1])
 
     # Check account's active position on Delta Exchange first
     pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
+    current_pos = 0
+    if pos_info["active"]:
+        current_pos = 1 if pos_info["side"] == "long" else -1
+
+    # The per-candle gate stays: it is what stops a failed position read from
+    # re-entering every 10s, which is how the duplicate-fill burst happened.
+    needs_action = (target_pos != current_pos) and is_fresh_candle_close
+    sig = target_pos if needs_action else 0
+
+    # Strategy says flat but we hold something -> close it out here; the entry
+    # branches below only handle opening and flipping.
+    if needs_action and target_pos == 0 and pos_info["active"]:
+        logging.info(
+            f"Strategy target is FLAT for {symbol} but position is "
+            f"{pos_info['side'].upper()}. Closing to match."
+        )
+        LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+        save_candle_tracker()
+        IS_ORDER_IN_FLIGHT[symbol] = True
+        try:
+            close_position(adapter, symbol, pos_info, reason="strategy target flat")
+        finally:
+            IS_ORDER_IN_FLIGHT[symbol] = False
+        return
 
     # 3. Stop loss per the active stop_mode, ratcheting tighter only.
     if sig != 0:
@@ -717,7 +747,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     logging.info(
         f"Live Price ({symbol}): ${current_live_price:.2f} | Stop Mode: {STOP_MODE} | "
         f"Long/Short Stop Candidate: ${long_stop:.2f} / ${short_stop:.2f} | "
-        f"3LB Trend: {lb_dir} | Brick Painted This Candle: {brick_printed_now} | Fresh Candle: {is_fresh_candle_close} | "
+        f"3LB Trend: {lb_dir} | Brick Painted: {brick_printed_now} | Target: {target_pos:+d} Current: {current_pos:+d} | Fresh: {is_fresh_candle_close} | "
         f"Signal: {sig} | SL: ${sl_level:.2f}"
     )
 
