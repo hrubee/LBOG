@@ -8,3 +8,6 @@ wallet_fills.json
 uv.lock
 *.db
 entry_msgs.json
+
+# backtest OHLCV cache (regenerate with: python3 backtest/run.py --tf 4h --fetch)
+backtest/data/
