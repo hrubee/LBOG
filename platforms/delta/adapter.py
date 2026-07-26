@@ -72,6 +72,8 @@ class DeltaExchangeAdapter:
 
 
         self._markets_loaded = False
+        self._paper_positions = {}
+        self._paper_stop_orders = []
 
     @property
     def is_live(self) -> bool:
@@ -258,7 +260,11 @@ class DeltaExchangeAdapter:
     def fetch_open_positions(self) -> list:
         """Return every open perpetual swap position on the account."""
         if not self._is_live:
-            raise RuntimeError("fetch_open_positions requires live mode")
+            out = []
+            for p_sym, p_data in self._paper_positions.items():
+                if abs(p_data.get("contracts", 0.0)) > 0:
+                    out.append(p_data)
+            return out
         
         return self._exchange.fetch_positions(params={"type": "future"}) or []
 
@@ -289,12 +295,25 @@ class DeltaExchangeAdapter:
             return []
 
     def market_open(self, symbol: str, is_buy: bool, size: float, inst_type: str = "spot", reduce_only: bool = False, stop_loss_price: float = None) -> dict:
-        """Place a market order. Returns CCXT order dict with `filled`/`amount`
-        rewritten to coin units (not contracts), so callers always see size in
-        the same units they passed in. Without this conversion, Go records
-        contract counts as coin quantities and inflates positions by 1/contract_size."""
+        """Place a market order in Live or Paper simulation mode."""
         if not self._is_live:
-            raise RuntimeError("market_open requires live mode")
+            side_str = "buy" if is_buy else "sell"
+            pair = self._format_symbol(symbol, inst_type)
+            current_px = self.get_perp_price(symbol)
+            if reduce_only:
+                self._paper_positions.pop(pair, None)
+            else:
+                self._paper_positions[pair] = {
+                    "symbol": pair,
+                    "side": side_str,
+                    "contracts": size / 0.001 if symbol.upper() == "BTC" else size,
+                    "entryPrice": current_px,
+                    "markPrice": current_px,
+                    "info": {"unrealized_pnl": 0.0, "mark_price": str(current_px)}
+                }
+                if stop_loss_price and stop_loss_price > 0:
+                    self.market_stop_loss(symbol, is_buy=not is_buy, size=size, stop_price=stop_loss_price, inst_type=inst_type)
+            return {"id": "paper_order_1", "status": "closed", "filled": size, "amount": size, "price": current_px, "side": side_str}
 
         self._load_markets()
         side = "buy" if is_buy else "sell"
@@ -357,7 +376,16 @@ class DeltaExchangeAdapter:
     def market_stop_loss(self, symbol: str, is_buy: bool, size: float, stop_price: float, inst_type: str = "spot") -> dict:
         """Place a stop-loss or take-profit order."""
         if not self._is_live:
-            raise RuntimeError("market_stop_loss requires live mode")
+            side_str = "buy" if is_buy else "sell"
+            self._paper_stop_orders = [{
+                "id": "paper_sl_1",
+                "side": side_str,
+                "trigger_price": stop_price,
+                "reduce_only": True,
+                "qty": size,
+                "info": {"stop_order_type": "stop_loss_order", "stop_price": str(stop_price)}
+            }]
+            return {"id": "paper_sl_1", "status": "open", "price": stop_price}
         
         self._load_markets()
         side = "buy" if is_buy else "sell"
@@ -498,6 +526,9 @@ class DeltaExchangeAdapter:
         [{id, side, trigger_price, reduce_only, qty}]. Delta's untriggered stop
         orders may appear on the plain or the trigger order list depending on
         type, so query both and merge by id (mirrors the Binance fix)."""
+        if not self._is_live:
+            return self._paper_stop_orders
+
         pair = self._format_symbol(symbol, inst_type)
         base = {"type": "future"} if inst_type == "futures" else {}
         seen, out = set(), []
@@ -532,7 +563,7 @@ class DeltaExchangeAdapter:
     def get_account_balance(self, inst_type: str = "spot") -> float:
         """Return total USDT-denominated account value."""
         if not self._is_live:
-            raise RuntimeError("get_account_balance requires live mode")
+            return 1000.0
             
         params = {"type": "future"} if inst_type == "futures" else {}
         bal = self._exchange.fetch_balance(params=params)
