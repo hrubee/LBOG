@@ -395,10 +395,10 @@ def run_sync_protection(symbol, side, size, avg_cost, entry_atr, stop_loss_atr_m
 
             matched_ids = set()
             for idx, ((atr_mult, frac), tier_size) in enumerate(zip(tiers_tuples, tier_sizes)):
-                if side in ("long", "buy"):
-                    raw_px = avg_cost + atr_mult * entry_atr
+                if entry_atr > 0:
+                    raw_px = avg_cost + (atr_mult * entry_atr if side in ("long", "buy") else -atr_mult * entry_atr)
                 else:
-                    raw_px = avg_cost - atr_mult * entry_atr
+                    raw_px = atr_mult  # Explicit tp_price passed directly
                 tp_pxs.append(raw_px)
                 tol = max(1e-4, abs(raw_px) * 5e-4)
 
