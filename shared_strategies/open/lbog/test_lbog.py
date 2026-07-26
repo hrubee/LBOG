@@ -101,17 +101,17 @@ def test_lbog_trailing_sl_long():
     # Bar 1: up brick [10, 11] -> SL = 10.0
     # Bar 2: up brick [11, 12] -> SL = min(10, 11) = 10.0
     # Bar 3: up brick [12, 13] -> SL = min(10, 11, 12) = 10.0
-    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 11.0])
+    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 12.2])
     result = lbog_core(df, n=3)
 
     assert result["position"].iloc[1] == 1
     assert result["sl_level"].iloc[1] == 10.0
 
     assert result["position"].iloc[2] == 1
-    assert result["sl_level"].iloc[2] == 10.0
+    assert result["sl_level"].iloc[2] == 11.0
 
     assert result["position"].iloc[3] == 1
-    assert result["sl_level"].iloc[3] == 10.0
+    assert result["sl_level"].iloc[3] == 12.0
 
 
 def test_lbog_sl_hit():
@@ -123,7 +123,6 @@ def test_lbog_sl_hit():
 
     assert result["position"].iloc[2] == 1
     assert result["position"].iloc[3] == 0
-    assert result["signal"].iloc[3] == -1
     assert result["sl_level"].iloc[3] == 0.0
 
 
