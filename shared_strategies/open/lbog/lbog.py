@@ -94,33 +94,33 @@ def lbog_core(
         if pos == 0:
             if bd == 1:
                 pos = 1
-                curr_sl = low[i - 1]
+                curr_sl = last_brick["bot"]
             elif bd == -1:
                 pos = -1
-                curr_sl = high[i - 1]
+                curr_sl = last_brick["top"]
 
         elif pos == 1:
             if bd == -1:
                 pos = -1
-                curr_sl = high[i - 1]
+                curr_sl = last_brick["top"]
             elif curr_sl > 0.0 and low[i] <= curr_sl:
                 pos = 0
                 curr_sl = 0.0
             else:
-                curr_sl = low[i - 1] if curr_sl == 0.0 else max(curr_sl, low[i - 1])
+                curr_sl = max(curr_sl, last_brick["bot"]) if curr_sl > 0.0 else last_brick["bot"]
 
         elif pos == -1:
             if bd == 1:
                 # 3LB Reversal Up printed -> flip to Long
                 pos = 1
-                curr_sl = low[i - 1]
+                curr_sl = last_brick["bot"]
             elif curr_sl > 0.0 and high[i] >= curr_sl:
                 # Stop loss hit -> flatten position
                 pos = 0
                 curr_sl = 0.0
             else:
-                # Continue Short -> ratchet SL down to previous candle high
-                curr_sl = high[i - 1] if curr_sl == 0.0 else min(curr_sl, high[i - 1])
+                # Continue Short -> SL at 3LB structural top
+                curr_sl = min(curr_sl, last_brick["top"]) if curr_sl > 0.0 else last_brick["top"]
 
         position[i] = pos
         sl[i] = curr_sl
