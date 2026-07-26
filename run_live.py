@@ -299,8 +299,9 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
             # Mark candle as stopped out to prevent re-entering on the same 5m candle
             if df is not None and len(df) > 0:
                 try:
-                    latest_candle_ts = df.index[-1].value // 10**6
+                    latest_candle_ts = int(df.index[-1].timestamp() * 1000)
                     LAST_STOPPED_CANDLE_TIME[symbol] = latest_candle_ts
+                    save_candle_tracker()
                 except Exception:
                     pass
 
@@ -442,9 +443,36 @@ def get_minimum_trade_size(symbol: str) -> float:
     return 0.01 if symbol.upper() == "ETH" else 0.001
 
 
+CANDLE_TRACKER_FILE = os.path.join(os.path.dirname(__file__), "processed_candles.json")
 LAST_PROCESSED_CANDLE_TIME = {}
 LAST_STOPPED_CANDLE_TIME = {}
 IS_ORDER_IN_FLIGHT = {}
+
+
+def load_candle_tracker():
+    global LAST_PROCESSED_CANDLE_TIME, LAST_STOPPED_CANDLE_TIME
+    if os.path.exists(CANDLE_TRACKER_FILE):
+        try:
+            with open(CANDLE_TRACKER_FILE, "r") as f:
+                data = json.load(f)
+                LAST_PROCESSED_CANDLE_TIME = data.get("processed", {})
+                LAST_STOPPED_CANDLE_TIME = data.get("stopped", {})
+        except Exception:
+            pass
+
+
+def save_candle_tracker():
+    try:
+        with open(CANDLE_TRACKER_FILE, "w") as f:
+            json.dump({
+                "processed": LAST_PROCESSED_CANDLE_TIME,
+                "stopped": LAST_STOPPED_CANDLE_TIME
+            }, f, indent=2)
+    except Exception:
+        pass
+
+
+load_candle_tracker()
 
 
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
@@ -530,6 +558,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     if should_enter_long:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
+        save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "long":
             logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
@@ -566,6 +595,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     elif should_enter_short:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
+        save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "short":
             logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
