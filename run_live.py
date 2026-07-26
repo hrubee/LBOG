@@ -568,21 +568,11 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if sl_level > 0:
         trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=20.0)
     
-    # 1:2 Risk/Reward Take Profit (TP) Calculation
-    risk_dist = abs(current_live_price - sl_level) if sl_level > 0 else 30.0
+    # Pure 3LB Trend Trailing Exit Architecture:
+    # No static TP orders placed on exchange — trades run indefinitely during trends
+    # and exit ONLY when a true 3LB trend reversal brick prints or structural SL is hit.
     tp_level = 0.0
-    if pos_info["active"]:
-        entry_px = pos_info["entry_price"] if pos_info["entry_price"] > 0 else current_live_price
-        if pos_info["side"] == "long":
-            tp_level = entry_px + (2.0 * risk_dist)
-        else:
-            tp_level = max(0.0, entry_px - (2.0 * risk_dist))
-    elif sig == 1:
-        tp_level = current_live_price + (2.0 * risk_dist)
-    elif sig == -1:
-        tp_level = max(0.0, current_live_price - (2.0 * risk_dist))
-
-    tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
+    tp_tiers_json = ""
 
     # Trade Entry logic (Instant Real-Time 3LB Brick Breakout Execution):
     # Rule 1: Enter LONG INSTANTLY when a new Green 3LB Brick prints (new_green_brick or sig == 1)
