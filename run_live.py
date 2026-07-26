@@ -688,24 +688,25 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
 def main():
     is_real = os.environ.get("DELTA_SANDBOX", "1") == "0"
-    mode_name = "REAL Production API" if is_real else "Demo Account API"
+    mode_name = "REAL Production API" if is_real else "Demo Account Paper Mode"
     logging.info("=" * 65)
-    logging.info(f"Starting LBOG Live Execution Daemon on Mac ({mode_name})")
+    logging.info(f"Starting LBOG Live Execution Daemon ({mode_name})")
     logging.info("=" * 65)
     
     adapter = DeltaExchangeAdapter()
-    if not adapter.is_live:
-        logging.error("Delta API Key / Secret missing in .env! Cannot start live runner.")
+    if is_real and not adapter.is_live:
+        logging.error("Delta Production API Key / Secret missing in .env! Cannot start live runner.")
         sys.exit(1)
 
     logging.info(f"Successfully connected to Delta Exchange {mode_name}.")
-    for sym in SYMBOLS:
-        try:
-            pair = adapter._format_symbol(sym, INST_TYPE)
-            adapter._exchange.set_leverage(2, pair)
-            logging.info(f"Set Exchange Leverage to 2x for {sym} ({pair}).")
-        except Exception as lev_err:
-            logging.warning(f"Could not set leverage to 2x on Delta for {sym}: {lev_err}")
+    if adapter.is_live:
+        for sym in SYMBOLS:
+            try:
+                pair = adapter._format_symbol(sym, INST_TYPE)
+                adapter._exchange.set_leverage(2, pair)
+                logging.info(f"Set Exchange Leverage to 2x for {sym} ({pair}).")
+            except Exception as lev_err:
+                logging.warning(f"Could not set leverage to 2x on Delta for {sym}: {lev_err}")
 
     seed_historical_fill_ids(adapter, SYMBOLS)
     logging.info(f"Starting continuous multi-asset loop for {', '.join(SYMBOLS)} on {TIMEFRAME} chart (polling every {LOOP_INTERVAL}s)... Press Ctrl+C to stop.")
