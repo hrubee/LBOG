@@ -335,6 +335,15 @@ def run_sync_protection(symbol, side, size, avg_cost, entry_atr, stop_loss_atr_m
             # place a fresh one when none match.
             tol = max(1e-4, abs(sl_px) * 1e-4)
             existing = adapter.list_open_stop_orders(symbol, inst_type)
+
+            # Cancel any leftover stop orders from previous opposite-side positions
+            opposite_side_orders = [o for o in existing if o.get("side") != close_side and o.get("id")]
+            if opposite_side_orders:
+                opp_ids = [o["id"] for o in opposite_side_orders]
+                print(f"[INFO] SL reconcile {symbol}: cancelling {len(opp_ids)} leftover opposite-side stop(s).", file=sys.stderr)
+                adapter.cancel_orders(symbol, inst_type, opp_ids)
+                existing = [o for o in existing if o["id"] not in opp_ids]
+
             sl_side_orders = [o for o in existing if o.get("side") == close_side and o.get("trigger_price") is not None]
 
             at_target = [o for o in sl_side_orders if o.get("trigger_price") is not None and abs(o["trigger_price"] - sl_px) <= tol]
