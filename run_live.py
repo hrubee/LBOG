@@ -296,6 +296,14 @@ def sync_real_wallet_fills(adapter: DeltaExchangeAdapter, symbol: str, df=None, 
             lf.write(fill_record + "\n")
 
         if is_exit_fill:
+            # Mark candle as stopped out to prevent re-entering on the same 5m candle
+            if df is not None and len(df) > 0:
+                try:
+                    latest_candle_ts = df.index[-1].value // 10**6
+                    LAST_STOPPED_CANDLE_TIME[symbol] = latest_candle_ts
+                except Exception:
+                    pass
+
             # EXIT FILL: Reply 'exit' directly to the corresponding entry alert message!
             reply_id = ENTRY_MSG_IDS.get(symbol)
             pnl_val = float(r_pnl) if r_pnl else 0.0
@@ -435,6 +443,7 @@ def get_minimum_trade_size(symbol: str) -> float:
 
 
 LAST_PROCESSED_CANDLE_TIME = {}
+LAST_STOPPED_CANDLE_TIME = {}
 IS_ORDER_IN_FLIGHT = {}
 
 
@@ -512,11 +521,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
 
-    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Guard):
-    # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1) AND candle is NEW.
+    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Guard + Stopped-Out Cooldown):
+    # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1) AND candle is NEW and NOT stopped out.
     # Rule 3: Zero stacking when position is active. Zero duplicate entries within the same 5m bar.
-    should_enter_long = (sig == 1) and is_new_candle
-    should_enter_short = (sig == -1) and is_new_candle
+    is_not_stopped_candle = (LAST_STOPPED_CANDLE_TIME.get(symbol) != latest_candle_time)
+    should_enter_long = (sig == 1) and is_new_candle and is_not_stopped_candle
+    should_enter_short = (sig == -1) and is_new_candle and is_not_stopped_candle
 
     if should_enter_long:
         LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
