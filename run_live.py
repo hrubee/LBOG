@@ -497,21 +497,47 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     df = _make_dataframe(completed_candles)
     
-    # 2. Run LBOG Strategy Core on completed candles
+    # Fetch current live perp mark price
+    current_live_price = adapter.get_perp_price(symbol)
+
+    # 3LB Brick Structural Boundaries
+    lb_lines = linebreak(df['close'].values, n=3)
+    last_brick = lb_lines[-1]
+    brick_top = float(last_brick["top"])
+    brick_bot = float(last_brick["bot"])
+
+    # 2. Run LBOG Strategy Core
     result = lbog_strategy(df)
     latest_bar = result.iloc[-1]
     sig = int(latest_bar["signal"])
     sl_level = float(latest_bar["sl_level"])
     lb_dir = int(latest_bar["lb_dir"])
-    latest_close = float(df.iloc[-1]["close"])
+
+    # Determine real-time 3LB brick breakout triggers:
+    # 1. New Green 3LB Brick prints when live price > brick_top -> BUY (LONG)
+    # 2. New Red 3LB Brick prints when live price < brick_bot -> SELL (SHORT)
+    new_green_brick = (current_live_price > brick_top)
+    new_red_brick = (current_live_price < brick_bot)
+
+    if new_green_brick:
+        sig = 1
+        sl_level = brick_bot
+        lb_dir = 1
+    elif new_red_brick:
+        sig = -1
+        sl_level = brick_top
+        lb_dir = -1
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
     sync_real_wallet_fills(adapter, symbol, df=df, sl_level=sl_level)
 
-    logging.info(f"Market Close ({symbol}): ${latest_close:.2f} | 3LB Trend: {lb_dir} | Signal: {sig} | Calculated SL: ${sl_level:.2f}")
+    logging.info(
+        f"Live Price ({symbol}): ${current_live_price:.2f} | 3LB Top: ${brick_top:.2f} | 3LB Bot: ${brick_bot:.2f} | "
+        f"3LB Trend: {lb_dir} | Signal: {sig} | Calculated SL: ${sl_level:.2f}"
+    )
 
     # 4. Check account's active position on Delta Exchange
-    pos_info = check_existing_position(adapter, symbol, current_price=latest_close)
+    pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
     if pos_info["active"]:
         pnl_str = f"+${pos_info['unrealized_pnl']:.2f}" if pos_info['unrealized_pnl'] >= 0 else f"-${abs(pos_info['unrealized_pnl']):.2f}"
         pct_str = f"+{pos_info['pnl_pct']:.2f}%" if pos_info['pnl_pct'] >= 0 else f"{pos_info['pnl_pct']:.2f}%"
@@ -525,27 +551,28 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # Calculate 3% risk-based position size if entering a new trade (20x leverage capacity)
     trade_size = get_minimum_trade_size(symbol)
     if sl_level > 0:
-        trade_size = calculate_3pct_risk_size(adapter, symbol, latest_close, sl_level, max_leverage=20.0)
+        trade_size = calculate_3pct_risk_size(adapter, symbol, current_live_price, sl_level, max_leverage=20.0)
     
     # 1:2 Risk/Reward Take Profit (TP) Calculation
-    risk_dist = abs(latest_close - sl_level) if sl_level > 0 else 30.0
+    risk_dist = abs(current_live_price - sl_level) if sl_level > 0 else 30.0
     tp_level = 0.0
     if pos_info["active"]:
-        entry_px = pos_info["entry_price"] if pos_info["entry_price"] > 0 else latest_close
+        entry_px = pos_info["entry_price"] if pos_info["entry_price"] > 0 else current_live_price
         if pos_info["side"] == "long":
             tp_level = entry_px + (2.0 * risk_dist)
         else:
             tp_level = max(0.0, entry_px - (2.0 * risk_dist))
     elif sig == 1:
-        tp_level = latest_close + (2.0 * risk_dist)
+        tp_level = current_live_price + (2.0 * risk_dist)
     elif sig == -1:
-        tp_level = max(0.0, latest_close - (2.0 * risk_dist))
+        tp_level = max(0.0, current_live_price - (2.0 * risk_dist))
 
     tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
 
-    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Close Guard):
-    # Rule 1 & 2: Enter ONLY when a fresh 3LB breakout signal fires (sig == 1 or sig == -1) AND candle has JUST CLOSED.
-    # Rule 3: Zero stacking when position is active. ZERO mid-candle entries.
+    # Trade Entry logic (Instant Real-Time 3LB Brick Breakout Execution):
+    # Rule 1: Enter LONG INSTANTLY when a new Green 3LB Brick prints (sig == 1)
+    # Rule 2: Enter SHORT INSTANTLY when a new Red 3LB Brick prints (sig == -1)
+    # Rule 3: Zero duplicate re-entries on the same brick
     is_not_stopped_candle = (LAST_STOPPED_CANDLE_TIME.get(symbol) != completed_candle_time)
     should_enter_long = (sig == 1) and is_fresh_candle_close and is_not_stopped_candle
     should_enter_short = (sig == -1) and is_fresh_candle_close and is_not_stopped_candle
