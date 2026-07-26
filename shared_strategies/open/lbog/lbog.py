@@ -36,7 +36,7 @@ def linebreak(close: np.ndarray, n: int = 3) -> list[dict]:
     return lines
 
 
-STOP_MODES = ("prev_candle", "brick")
+STOP_MODES = ("prev_candle", "brick", "none")
 
 
 def stop_breached(side: str, stop: float, price: float) -> bool:
@@ -81,6 +81,12 @@ def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: 
             float(min(x["bot"] for x in last_n)),
             float(max(x["top"] for x in last_n)),
         )
+    if stop_mode == "none":
+        # No protective stop at all. A position is held until an opposite brick
+        # prints — the "enter on colour change, hold to the opposite colour"
+        # rule. 0.0 signals "no stop", and callers must treat it as such rather
+        # than as a price (see the curr_sl > 0 guards in lbog_core).
+        return 0.0, 0.0
     raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
 
 
@@ -175,7 +181,8 @@ def lbog_core(
             # took it out. The resting exchange stop fires intrabar, so it is
             # checked before the close-based brick flip.
             curr_sl = max(curr_sl, long_stop) if curr_sl > 0.0 else long_stop
-            if low[i] <= curr_sl:
+            # curr_sl == 0 means "no stop" (stop_mode='none'), not "stop at zero".
+            if curr_sl > 0.0 and low[i] <= curr_sl:
                 pos = 0
                 curr_sl = 0.0
             if brick_printed_now and bd == -1:
@@ -186,7 +193,9 @@ def lbog_core(
         elif pos == -1:
             # Ratchet SL down (never loosens).
             curr_sl = min(curr_sl, short_stop) if curr_sl > 0.0 else short_stop
-            if high[i] >= curr_sl:
+            # Without this guard a zero stop reads as "high >= 0", which is always
+            # true — every short would exit on the bar after entry.
+            if curr_sl > 0.0 and high[i] >= curr_sl:
                 pos = 0
                 curr_sl = 0.0
             if brick_printed_now and bd == 1:

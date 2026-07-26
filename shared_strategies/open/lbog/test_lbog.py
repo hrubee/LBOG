@@ -248,7 +248,9 @@ def test_stop_mode_short_ratchets_in_both_modes():
     lows = [9.0, 8.0, 7.0, 6.0]
     df = make_ohlcv(closes, highs=highs, lows=lows)
 
-    for mode in STOP_MODES:
+    # 'none' is excluded by construction: it publishes no stop, so there is
+    # nothing to ratchet. Covered separately by the stop_mode_none tests.
+    for mode in [m for m in STOP_MODES if m != "none"]:
         r = lbog_core(df, n=1, stop_mode=mode)
         seg = [r["sl_level"].iloc[i] for i in (1, 2, 3)]
         assert all(r["position"].iloc[i] == -1 for i in (1, 2, 3)), \
@@ -301,6 +303,45 @@ def test_stop_breached_matches_core_exit_condition():
     assert r["position"].iloc[3] == 0
     # The live predicate reaches the same verdict from price vs level.
     assert stop_breached("long", 11.5, 9.5) is True
+
+
+def test_stop_mode_none_holds_until_opposite_brick():
+    """stop_mode='none' must never stop out — only an opposite brick exits."""
+    # A deep dip that would breach any candle-based stop, but no opposite brick.
+    closes = [10.0, 11.0, 12.0, 12.5]
+    lows = [9.0, 10.0, 5.0, 5.0]      # low[2]=5.0 breaks every prev-candle stop
+    df = make_ohlcv(closes, lows=lows)
+
+    # Bar 2: low 5.0 breaks the prev-candle stop (low[0]=9.0) -> flat.
+    # In none mode there is no stop, so the position rides through.
+    assert lbog_core(df, n=3, stop_mode="prev_candle")["position"].iloc[2] == 0
+    assert lbog_core(df, n=3, stop_mode="none")["position"].iloc[2] == 1
+    # and no stop level is ever published
+    assert (lbog_core(df, n=3, stop_mode="none")["sl_level"] == 0.0).all()
+
+
+def test_stop_mode_none_shorts_do_not_instantly_exit():
+    """
+    Regression: a zero stop compared as `high >= curr_sl` is always true, which
+    exited every short on the bar after entry. Shorts must survive in none mode.
+    """
+    closes = [10.0, 9.0, 8.0, 7.0]
+    highs = [12.0, 11.0, 10.0, 9.0]
+    lows = [9.0, 8.0, 7.0, 6.0]
+    df = make_ohlcv(closes, highs=highs, lows=lows)
+    r = lbog_core(df, n=1, stop_mode="none")
+    assert r["position"].iloc[1] == -1
+    assert r["position"].iloc[2] == -1, "short exited despite no stop"
+    assert r["position"].iloc[3] == -1, "short exited despite no stop"
+
+
+def test_stop_mode_none_still_flips_on_opposite_brick():
+    """The only exit in none mode is the colour flip — verify it still fires."""
+    closes = [10.0, 11.0, 9.0]
+    df = make_ohlcv(closes, highs=[11.0, 12.0, 10.0], lows=[5.0, 5.0, 6.0])
+    r = lbog_core(df, n=1, stop_mode="none")
+    assert r["position"].iloc[1] == 1
+    assert r["position"].iloc[2] == -1, "did not flip on the opposite brick"
 
 
 if __name__ == "__main__":

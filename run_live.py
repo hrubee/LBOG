@@ -785,7 +785,22 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     opening_new_trade = (
         sig != 0 and not (pos_info["active"] and pos_info["side"] == ("long" if sig == 1 else "short"))
     )
-    if opening_new_trade and sl_level > 0:
+    # With stop_mode='none' no protective order is placed, so sl_level is 0 and
+    # there is no risk distance to size against. The position still has a defined
+    # exit — the opposite brick — so size against the distance to THAT level.
+    # It is a sizing reference only; no order is placed at it.
+    sizing_stop = sl_level
+    if STOP_MODE == "none" and target_side != "flat":
+        brick_long, brick_short = stop_levels(
+            lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, "brick"
+        )
+        sizing_stop = brick_long if target_side == "long" else brick_short
+        logging.info(
+            f"No stop order for {symbol} (stop_mode=none). Sizing against the opposite-brick "
+            f"level ${sizing_stop:,.4f} — distance to the actual exit."
+        )
+
+    if opening_new_trade and sizing_stop > 0:
         # Never open a position whose stop is ALREADY on the wrong side of price.
         # stop_levels returns a historical candle extreme with no guarantee it sits
         # protectively relative to the price we would actually fill at — for a
@@ -793,13 +808,13 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         # target. Such a position is born breached and gets closed on the next
         # cycle, then reopened, churning fees every 10s for no price movement.
         # The strategy would have exited it immediately, so do not take it.
-        if stop_breached(target_side, sl_level, current_live_price):
-            size_error = (f"stop ${sl_level:,.2f} is already on the wrong side of price "
+        if stop_breached(target_side, sizing_stop, current_live_price):
+            size_error = (f"stop ${sizing_stop:,.2f} is already on the wrong side of price "
                           f"${current_live_price:,.2f} for a {target_side.upper()}")
             logging.warning(f"Skipping {symbol} entry — {size_error}. Waiting for a valid stop.")
         else:
             try:
-                trade_size = calculate_risk_size(adapter, symbol, current_live_price, sl_level,
+                trade_size = calculate_risk_size(adapter, symbol, current_live_price, sizing_stop,
                                                  risk_pct=RISK_PCT, max_leverage=2.0)
             except BalanceUnavailable as e:
                 size_error = str(e)
