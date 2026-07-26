@@ -119,8 +119,8 @@ def lbog_core(
                 pos = 0
                 curr_sl = 0.0
             else:
-                # Continue Short -> SL at 3LB structural top
-                curr_sl = min(curr_sl, last_brick["top"]) if curr_sl > 0.0 else last_brick["top"]
+                # Continue Short -> SL at 3LB structural top (highest top of line break pattern)
+                curr_sl = max(curr_sl, last_brick["top"]) if curr_sl > 0.0 else last_brick["top"]
 
         position[i] = pos
         sl[i] = curr_sl

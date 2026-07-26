@@ -536,11 +536,11 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     if new_green_brick:
         sig = 1
-        sl_level = float(last_brick["bot"])
+        sl_level = float(red_trigger)
         lb_dir = 1
     elif new_red_brick:
         sig = -1
-        sl_level = float(last_brick["top"])
+        sl_level = float(green_trigger)
         lb_dir = -1
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
