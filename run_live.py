@@ -598,7 +598,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
             try:
                 run_sync_protection(
-                    symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=latest_close,
+                    symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=current_live_price,
                     entry_atr=0.0, stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                     tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                 )
@@ -619,7 +619,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 if sl_level > 0:
                     try:
                         run_sync_protection(
-                            symbol=symbol, side="long", size=trade_size, avg_cost=latest_close, entry_atr=0.0,
+                            symbol=symbol, side="long", size=trade_size, avg_cost=current_live_price, entry_atr=0.0,
                             stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
                             tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
                         )
