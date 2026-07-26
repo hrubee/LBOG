@@ -534,7 +534,13 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     new_green_brick = (current_live_price > green_trigger)
     new_red_brick = (current_live_price < red_trigger)
 
-    if new_green_brick:
+    if pos_info["active"] and pos_info["side"] == "short":
+        # Dynamic 3LB Trailing SL: Trail SL downwards to green_trigger (top of active 3LB pattern)
+        sl_level = min(sl_level if sl_level > 0 else green_trigger, green_trigger)
+    elif pos_info["active"] and pos_info["side"] == "long":
+        # Dynamic 3LB Trailing SL: Trail SL upwards to red_trigger (bot of active 3LB pattern)
+        sl_level = max(sl_level if sl_level > 0 else red_trigger, red_trigger)
+    elif new_green_brick:
         sig = 1
         sl_level = float(red_trigger)
         lb_dir = 1
