@@ -484,26 +484,20 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     
     # 1. Fetch OHLCV candles
     candles = adapter.get_ohlcv(symbol, interval=TIMEFRAME, limit=200, inst_type=INST_TYPE)
-    # Ensure we only process closed candles (drop in-progress live candle)
-    tf_ms = 5 * 60 * 1000
-    if TIMEFRAME.endswith("m"):
-        tf_ms = int(TIMEFRAME.replace("m", "")) * 60 * 1000
-    elif TIMEFRAME.endswith("h"):
-        tf_ms = int(TIMEFRAME.replace("h", "")) * 3600 * 1000
-
-    now_ms = time.time() * 1000
-    if candles and (now_ms - candles[-1][0]) < tf_ms:
-        candles = candles[:-1]
-
-    if not candles:
+    if not candles or len(candles) < 2:
         return
 
-    latest_candle_time = candles[-1][0]
-    is_new_candle = (LAST_PROCESSED_CANDLE_TIME.get(symbol) != latest_candle_time)
+    # candles[-1] is the live, in-progress 5m candle forming right now.
+    # candles[-2] is the FULLY CLOSED 5m candle.
+    completed_candles = candles[:-1]
+    completed_candle_time = completed_candles[-1][0]
 
-    df = _make_dataframe(candles)
+    # Check if this completed candle close has ALREADY been evaluated for trade entry
+    is_fresh_candle_close = (LAST_PROCESSED_CANDLE_TIME.get(symbol) != completed_candle_time)
+
+    df = _make_dataframe(completed_candles)
     
-    # 2. Run LBOG Strategy Core
+    # 2. Run LBOG Strategy Core on completed candles
     result = lbog_strategy(df)
     latest_bar = result.iloc[-1]
     sig = int(latest_bar["signal"])
@@ -549,15 +543,15 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
 
-    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Guard + Stopped-Out Cooldown):
-    # Rule 1 & 2: Enter ONLY when a fresh 3LB brick breakout signal fires (sig == 1 or sig == -1) AND candle is NEW and NOT stopped out.
-    # Rule 3: Zero stacking when position is active. Zero duplicate entries within the same 5m bar.
-    is_not_stopped_candle = (LAST_STOPPED_CANDLE_TIME.get(symbol) != latest_candle_time)
-    should_enter_long = (sig == 1) and is_new_candle and is_not_stopped_candle
-    should_enter_short = (sig == -1) and is_new_candle and is_not_stopped_candle
+    # Trade Entry logic (Strict 4-Rule Architecture + 1 Entry Per Candle Close Guard):
+    # Rule 1 & 2: Enter ONLY when a fresh 3LB breakout signal fires (sig == 1 or sig == -1) AND candle has JUST CLOSED.
+    # Rule 3: Zero stacking when position is active. ZERO mid-candle entries.
+    is_not_stopped_candle = (LAST_STOPPED_CANDLE_TIME.get(symbol) != completed_candle_time)
+    should_enter_long = (sig == 1) and is_fresh_candle_close and is_not_stopped_candle
+    should_enter_short = (sig == -1) and is_fresh_candle_close and is_not_stopped_candle
 
     if should_enter_long:
-        LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
+        LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
         save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "long":
             logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
@@ -594,7 +588,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                 IS_ORDER_IN_FLIGHT[symbol] = False
 
     elif should_enter_short:
-        LAST_PROCESSED_CANDLE_TIME[symbol] = latest_candle_time
+        LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
         save_candle_tracker()
         if pos_info["active"] and pos_info["side"] == "short":
             logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
