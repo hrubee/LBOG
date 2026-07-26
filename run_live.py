@@ -62,6 +62,12 @@ parser.add_argument(
          "4h n8 universe: 0.5%%->30%%, 1%%->51%%, 2%%->77%%, 3%%->92%%."
 )
 parser.add_argument(
+    "--static-sl-pct", type=float, default=0.0,
+    help="Fixed disaster stop as a percent of the ENTRY price (e.g. 1.0 = 1%%). Does not "
+         "trail. Placed as a real resting order and used as the risk distance for position "
+         "sizing, which is what makes --risk-pct actually bind. 0 disables it."
+)
+parser.add_argument(
     "--lb-depth", type=int, default=3,
     help="Line-break depth N for the NLB chart (default: 3). Higher = fewer, larger swings; "
          "8 was the best-measured setting on 4h."
@@ -83,6 +89,9 @@ if not 0 < RISK_PCT <= 0.10:
 LB_DEPTH = args.lb_depth
 if LB_DEPTH < 1:
     parser.error("--lb-depth must be >= 1")
+STATIC_SL_PCT = args.static_sl_pct / 100.0
+if not 0 <= STATIC_SL_PCT <= 0.50:
+    parser.error("--static-sl-pct must be between 0 and 50")
 
 FITS_LOG_FILE = os.path.join(BASE_DIR, 'wallet_trades.log')
 FITS_JSON_FILE = os.path.join(BASE_DIR, 'wallet_fills.json')
@@ -693,7 +702,8 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # should be holding and make the exchange match. Self-healing, and it makes
     # the runner and the backtest the same computation instead of two that agree
     # only when nothing goes wrong.
-    core = lbog_core(df, n=LB_DEPTH, stop_mode=STOP_MODE, stop_lookback=STOP_LOOKBACK)
+    core = lbog_core(df, n=LB_DEPTH, stop_mode=STOP_MODE, stop_lookback=STOP_LOOKBACK,
+                     static_sl_pct=STATIC_SL_PCT)
     target_pos = int(core["position"].iloc[-1])
 
     # Check account's active position on Delta Exchange first
@@ -740,6 +750,24 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         if not (pos_info["active"] and pos_info["side"] == target_side):
             clear_stop(symbol)
         sl_level = ratchet_stop(symbol, target_side, long_stop, short_stop)
+
+        # Fixed disaster stop, anchored to the ACTUAL fill once we hold a
+        # position (and to current price when sizing a prospective one). It does
+        # not trail, and it only ever tightens the trailing level — so in
+        # stop_mode="none" it becomes the sole stop, giving every trade a hard
+        # floor that the opposite-brick exit cannot provide.
+        if STATIC_SL_PCT > 0:
+            anchor = (pos_info["entry_price"]
+                      if pos_info["active"] and pos_info["entry_price"] > 0
+                      else current_live_price)
+            static = (anchor * (1 - STATIC_SL_PCT) if target_side == "long"
+                      else anchor * (1 + STATIC_SL_PCT))
+            if sl_level <= 0:
+                sl_level = static
+            elif target_side == "long":
+                sl_level = max(sl_level, static)
+            else:
+                sl_level = min(sl_level, static)
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
     sync_real_wallet_fills(adapter, symbol, df=df, sl_level=sl_level)
@@ -789,8 +817,11 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # there is no risk distance to size against. The position still has a defined
     # exit — the opposite brick — so size against the distance to THAT level.
     # It is a sizing reference only; no order is placed at it.
+    # With a real stop level (trailing or static) that IS the risk distance.
+    # Only when there is no stop at all do we fall back to the opposite-brick
+    # level, which is where the trade ends but is not an enforced exit.
     sizing_stop = sl_level
-    if STOP_MODE == "none" and target_side != "flat":
+    if sl_level <= 0 and STOP_MODE == "none" and target_side != "flat":
         brick_long, brick_short = stop_levels(
             lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, "brick"
         )

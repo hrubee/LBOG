@@ -95,6 +95,7 @@ def lbog_core(
     n: int = 3,
     stop_mode: str = "prev_candle",
     stop_lookback: int = 2,
+    static_sl_pct: float = 0.0,
 ) -> pd.DataFrame:
     """
     Generate LBOG (Line Break Original) trend-following signals with 3-Line-Break (3LB).
@@ -110,6 +111,11 @@ def lbog_core(
                 "brick" trails the 3LB structural reversal level. See stop_levels.
     stop_lookback : how many bars back the prev_candle stop reads (default 2 —
                 the candle before the previous one). Ignored by "brick".
+    static_sl_pct : fixed disaster stop as a fraction of the ENTRY price (0.01 =
+                1%). Does not trail. Combined with the trailing stop by taking
+                whichever is tighter, so it acts as a floor under any single
+                trade — including in stop_mode="none", which otherwise has no
+                hard limit on one trade's loss. 0 disables it.
 
     Returns
     -------
@@ -119,6 +125,8 @@ def lbog_core(
         raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
     if stop_lookback < 1:
         raise ValueError(f"stop_lookback must be >= 1, got {stop_lookback}")
+    if static_sl_pct < 0:
+        raise ValueError(f"static_sl_pct must be >= 0, got {static_sl_pct}")
     result = pd.DataFrame(index=df.index)
     close = df["close"].values
     high = df["high"].values
@@ -144,6 +152,16 @@ def lbog_core(
     active_lines = []
     pos = 0
     curr_sl = 0.0
+    entry_px = 0.0        # fill price of the open position, for the static stop
+
+    def with_static(level: float, side: int) -> float:
+        """Tighten `level` with the fixed entry-anchored stop, if enabled."""
+        if static_sl_pct <= 0 or entry_px <= 0:
+            return level
+        floor = entry_px * (1 - static_sl_pct) if side == 1 else entry_px * (1 + static_sl_pct)
+        if level <= 0:
+            return floor
+        return max(level, floor) if side == 1 else min(level, floor)
 
     for i in range(1, num_bars):
         # Ingest line break bricks formed up to bar index i
@@ -171,37 +189,45 @@ def lbog_core(
             # the signal candle's close, so that bar's range is already history.
             if brick_printed_now and bd == 1:
                 pos = 1
-                curr_sl = long_stop
+                entry_px = float(close[i])
+                curr_sl = with_static(long_stop, 1)
             elif brick_printed_now and bd == -1:
                 pos = -1
-                curr_sl = short_stop
+                entry_px = float(close[i])
+                curr_sl = with_static(short_stop, -1)
 
         elif pos == 1:
             # Ratchet SL up (never loosens), then test whether this bar's low
             # took it out. The resting exchange stop fires intrabar, so it is
             # checked before the close-based brick flip.
             curr_sl = max(curr_sl, long_stop) if curr_sl > 0.0 else long_stop
+            curr_sl = with_static(curr_sl, 1)
             # curr_sl == 0 means "no stop" (stop_mode='none'), not "stop at zero".
             if curr_sl > 0.0 and low[i] <= curr_sl:
                 pos = 0
                 curr_sl = 0.0
+                entry_px = 0.0
             if brick_printed_now and bd == -1:
                 # Red brick printed -> short, whether or not the stop just hit
                 pos = -1
-                curr_sl = short_stop
+                entry_px = float(close[i])
+                curr_sl = with_static(short_stop, -1)
 
         elif pos == -1:
             # Ratchet SL down (never loosens).
             curr_sl = min(curr_sl, short_stop) if curr_sl > 0.0 else short_stop
+            curr_sl = with_static(curr_sl, -1)
             # Without this guard a zero stop reads as "high >= 0", which is always
             # true — every short would exit on the bar after entry.
             if curr_sl > 0.0 and high[i] >= curr_sl:
                 pos = 0
                 curr_sl = 0.0
+                entry_px = 0.0
             if brick_printed_now and bd == 1:
                 # Green brick printed -> long, whether or not the stop just hit
                 pos = 1
-                curr_sl = long_stop
+                entry_px = float(close[i])
+                curr_sl = with_static(long_stop, 1)
 
         position[i] = pos
         sl[i] = curr_sl
@@ -225,6 +251,7 @@ def lbog_core(
 
 
 def lbog_strategy(df: pd.DataFrame, n: int = 3, stop_mode: str = "prev_candle",
-                  stop_lookback: int = 2, **kwargs) -> pd.DataFrame:
+                  stop_lookback: int = 2, static_sl_pct: float = 0.0, **kwargs) -> pd.DataFrame:
     """Strategy wrapper entry-point for open strategy registry."""
-    return lbog_core(df, n=n, stop_mode=stop_mode, stop_lookback=stop_lookback)
+    return lbog_core(df, n=n, stop_mode=stop_mode, stop_lookback=stop_lookback,
+                     static_sl_pct=static_sl_pct)

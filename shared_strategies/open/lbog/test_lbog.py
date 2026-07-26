@@ -344,6 +344,44 @@ def test_stop_mode_none_still_flips_on_opposite_brick():
     assert r["position"].iloc[2] == -1, "did not flip on the opposite brick"
 
 
+def test_static_sl_gives_none_mode_a_hard_floor():
+    """stop_mode='none' has no stop; static_sl_pct must supply one."""
+    closes = [100.0, 101.0, 102.0, 90.0]
+    df = make_ohlcv(closes, highs=[101.0, 102.0, 103.0, 103.0],
+                    lows=[99.0, 100.0, 101.0, 90.0])
+    bare = lbog_core(df, n=3, stop_mode="none")
+    with_sl = lbog_core(df, n=3, stop_mode="none", static_sl_pct=0.02)
+
+    assert (bare["sl_level"] == 0.0).all(), "none mode should publish no stop"
+    # Long entered at close 101 -> floor at 101 * 0.98
+    assert abs(with_sl["sl_level"].iloc[1] - 98.98) < 1e-9
+    # Short entered at close 90 -> floor at 90 * 1.02
+    assert abs(with_sl["sl_level"].iloc[3] - 91.80) < 1e-9
+
+
+def test_static_sl_only_ever_tightens_a_trailing_stop():
+    """It is a floor, never a loosening: the tighter of the two always wins."""
+    closes = [10.0, 11.0, 12.0, 13.0]
+    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 12.2])
+    trail = lbog_core(df, n=3, stop_mode="prev_candle")
+    both = lbog_core(df, n=3, stop_mode="prev_candle", static_sl_pct=0.50)
+
+    for i in (1, 2, 3):
+        t, b = trail["sl_level"].iloc[i], both["sl_level"].iloc[i]
+        if t > 0 and b > 0:
+            assert b >= t, f"bar {i}: static loosened the long stop {t} -> {b}"
+
+
+def test_static_sl_rejects_negative():
+    df = make_ohlcv([10.0, 11.0, 12.0])
+    try:
+        lbog_core(df, n=3, static_sl_pct=-0.01)
+    except ValueError as e:
+        assert "static_sl_pct" in str(e)
+    else:
+        raise AssertionError("expected ValueError for negative static_sl_pct")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

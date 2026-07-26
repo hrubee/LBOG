@@ -53,6 +53,7 @@ def replay(
     n=3,
     stop_mode="prev_candle",
     stop_lookback=2,
+    static_sl_pct=0.0,
     atr_mult=3.0,
     atr_period=14,
     min_brick_atr=0.0,
@@ -118,6 +119,15 @@ def replay(
         pos, entry_i, entry_px = side, i, float(close[i])
         extreme = high[i] if side == 1 else low[i]
 
+    def with_static(level, side):
+        """Tighten `level` with the fixed entry-anchored stop, if enabled."""
+        if static_sl_pct <= 0 or entry_px <= 0:
+            return level
+        floor = entry_px * (1 - static_sl_pct) if side == 1 else entry_px * (1 + static_sl_pct)
+        if level <= 0:
+            return floor
+        return max(level, floor) if side == 1 else min(level, floor)
+
     def entry_allowed(i, direction, brick):
         if ema_v is not None:
             if direction == 1 and not close[i] > ema_v[i]:
@@ -173,6 +183,7 @@ def replay(
                 long_stop = float(extreme - atr_mult * a) if a > 0 else curr_sl
             if long_stop > 0:
                 curr_sl = max(curr_sl, long_stop) if curr_sl > 0 else long_stop
+            curr_sl = with_static(curr_sl, 1)
             # The stop is a resting exchange order, so it fires intrabar —
             # before any close-based flip can be evaluated.
             if curr_sl > 0 and low[i] <= curr_sl:
@@ -191,6 +202,7 @@ def replay(
                 short_stop = float(extreme + atr_mult * a) if a > 0 else curr_sl
             if short_stop > 0:
                 curr_sl = min(curr_sl, short_stop) if curr_sl > 0 else short_stop
+            curr_sl = with_static(curr_sl, -1)
             if curr_sl > 0 and high[i] >= curr_sl:
                 close_trade(i, curr_sl, "stop")
             if printed and bd == 1:
