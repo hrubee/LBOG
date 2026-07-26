@@ -414,8 +414,8 @@ def calculate_3pct_risk_size(adapter: DeltaExchangeAdapter, symbol: str, entry_p
         pass
 
     raw_size_coin = risk_amount / risk_distance
-    # Cap notional size to 90% of available free margin * max_leverage (5.0x)
-    max_notional = (avail_margin * 0.90) * max_leverage
+    # Cap notional size to 98% of available free margin * max_leverage (5.0x)
+    max_notional = (avail_margin * 0.98) * max_leverage
     max_size_cap = max_notional / entry_price if entry_price > 0 else 0.0
 
     final_size_coin = min(raw_size_coin, max_size_cap)
