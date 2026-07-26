@@ -792,7 +792,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # A stop that price has ALREADY traded through cannot be placed as a resting
     # stop — the exchange would read it as a take-profit and leave the position
     # naked. The exit condition is already satisfied, so close instead of syncing.
-    if pos_info["active"] and stop_breached(pos_info["side"], sl_level, current_live_price):
+    # Only meaningful while HOLDING: sl_level is computed for target_side, so on a
+    # flip it describes the side we are about to take, and a long's stop (below
+    # price) always reads as breached for the short we still hold. The flip path
+    # below closes that position properly, so skip the check when they differ.
+    if (pos_info["active"] and target_pos == current_pos
+            and stop_breached(pos_info["side"], sl_level, current_live_price)):
         logging.warning(
             f"STOP ALREADY BREACHED on {symbol}: {pos_info['side'].upper()} with SL "
             f"${sl_level:,.2f} vs live ${current_live_price:,.2f}. Closing now rather "
