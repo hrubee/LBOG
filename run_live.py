@@ -585,12 +585,14 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     tp_tiers_json = json.dumps([{"tp_price": tp_level, "pct": 1.0}]) if tp_level > 0 else ""
 
     # Trade Entry logic (Instant Real-Time 3LB Brick Breakout Execution):
-    # Rule 1: Enter LONG INSTANTLY when a new Green 3LB Brick prints (sig == 1)
-    # Rule 2: Enter SHORT INSTANTLY when a new Red 3LB Brick prints (sig == -1)
+    # Rule 1: Enter LONG INSTANTLY when a new Green 3LB Brick prints (new_green_brick or sig == 1)
+    # Rule 2: Enter SHORT INSTANTLY when a new Red 3LB Brick prints (new_red_brick or sig == -1)
     # Rule 3: Zero duplicate re-entries on the same brick
     is_not_stopped_candle = (LAST_STOPPED_CANDLE_TIME.get(symbol) != completed_candle_time)
-    should_enter_long = (sig == 1) and is_fresh_candle_close and is_not_stopped_candle
-    should_enter_short = (sig == -1) and is_fresh_candle_close and is_not_stopped_candle
+    is_new_breakout = is_fresh_candle_close or new_green_brick or new_red_brick
+
+    should_enter_long = (sig == 1) and is_new_breakout and is_not_stopped_candle
+    should_enter_short = (sig == -1) and is_new_breakout and is_not_stopped_candle
 
     if should_enter_long:
         LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
