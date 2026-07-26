@@ -634,10 +634,16 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             size_error = str(e)
             logging.error(f"Cannot size {symbol} position — refusing to open a trade this cycle: {e}")
 
-    # Pure 3LB Trend Trailing Exit Architecture:
-    # No static TP orders placed on exchange — trades run indefinitely during trends
-    # and exit ONLY when a true 3LB trend reversal brick prints or structural SL is hit.
-    tp_level = 0.0
+    # Exit architecture: no take-profit, by design (removed in 17b1234). A trade
+    # ends when the ratcheting SL is hit, or when an opposite brick prints and the
+    # flip below closes it. Measured over 7y of 4h BTC, the SL accounts for 99.7%
+    # of exits and the flip for 0.3% — with the prev_candle stop, price effectively
+    # never travels far enough to print an opposing brick before the stop fires.
+    #
+    # tiers_json is passed empty so check_delta's TP block is skipped entirely. If
+    # a TP is ever wanted, add it HERE via tiers_json rather than placing an order
+    # out of band: the SL reconcile cancels any same-side trigger order that is not
+    # at the SL price, which would silently kill a hand-placed TP each cycle.
     tp_tiers_json = ""
 
     # Trade Entry logic (close-confirmed 3LB brick execution):
@@ -651,7 +657,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         if pos_info["active"] and pos_info["side"] == "long":
             LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
             save_candle_tracker()
-            logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
+            logging.info(f"Position is already LONG on {symbol}. Syncing SL @ ${sl_level:.2f}...")
             try:
                 run_sync_protection(
                     symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=current_live_price,
@@ -677,7 +683,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                     time.sleep(1)
 
-                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f} & 1:2 TP @ ${tp_level:.2f}...")
+                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
                 order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
                 logging.info(f"Atomic Order & SL filled: {order_res}")
                 time.sleep(1)
@@ -697,7 +703,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         if pos_info["active"] and pos_info["side"] == "short":
             LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
             save_candle_tracker()
-            logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
+            logging.info(f"Position is already SHORT on {symbol}. Syncing SL @ ${sl_level:.2f}...")
             try:
                 run_sync_protection(
                     symbol=symbol, side=pos_info["side"], size=pos_info["size"], avg_cost=current_live_price,
@@ -723,7 +729,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
                     adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
                     time.sleep(1)
 
-                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f} & 1:2 TP @ ${tp_level:.2f}...")
+                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
                 order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
                 logging.info(f"Atomic Order & SL filled: {order_res}")
                 time.sleep(1)
@@ -741,7 +747,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
-            logging.info(f"Maintaining active {pos_info['side'].upper()} trade on {symbol}. Syncing SL @ ${sl_level:.2f} | 1:2 TP @ ${tp_level:.2f}...")
+            logging.info(f"Maintaining active {pos_info['side'].upper()} trade on {symbol}. Syncing SL @ ${sl_level:.2f}...")
             close_is_buy = (pos_info["side"] == "short")
             try:
                 run_sync_protection(
@@ -771,6 +777,7 @@ def main():
         f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE} "
         f"({'previous candle low/high' if STOP_MODE == 'prev_candle' else '3LB structural reversal level'})"
     )
+    logging.info("Exits: ratcheting stop-loss + opposite-brick flip. No take-profit (by design).")
     logging.info("=" * 65)
     
     adapter = DeltaExchangeAdapter()
