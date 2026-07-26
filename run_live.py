@@ -475,6 +475,22 @@ def save_candle_tracker():
 load_candle_tracker()
 
 
+def get_3lb_reversal_levels(lb_lines, n=3):
+    if not lb_lines:
+        return 0.0, 0.0
+    active = lb_lines[-1]
+    last_n = lb_lines[-n:] if len(lb_lines) >= n else lb_lines
+    
+    if active["dir"] == 1:
+        green_trigger = active["top"]
+        red_trigger = min(line["bot"] for line in last_n)
+    else:
+        green_trigger = max(line["top"] for line in last_n)
+        red_trigger = active["bot"]
+        
+    return float(green_trigger), float(red_trigger)
+
+
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     logging.info(f"--- Cycle check: {symbol} ({TIMEFRAME}, {INST_TYPE}) ---")
     
@@ -500,11 +516,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # Fetch current live perp mark price
     current_live_price = adapter.get_perp_price(symbol)
 
-    # 3LB Brick Structural Boundaries
+    # 3LB Brick Structural Boundaries & Reversal Trigger Levels
     lb_lines = linebreak(df['close'].values, n=3)
     last_brick = lb_lines[-1]
-    brick_top = float(last_brick["top"])
-    brick_bot = float(last_brick["bot"])
+    green_trigger, red_trigger = get_3lb_reversal_levels(lb_lines, n=3)
 
     # 2. Run LBOG Strategy Core
     result = lbog_strategy(df)
@@ -514,25 +529,25 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     lb_dir = int(latest_bar["lb_dir"])
 
     # Determine real-time 3LB brick breakout triggers:
-    # 1. New Green 3LB Brick prints when live price > brick_top -> BUY (LONG)
-    # 2. New Red 3LB Brick prints when live price < brick_bot -> SELL (SHORT)
-    new_green_brick = (current_live_price > brick_top)
-    new_red_brick = (current_live_price < brick_bot)
+    # 1. New Green 3LB Brick prints when live price > green_trigger -> BUY (LONG)
+    # 2. New Red 3LB Brick prints when live price < red_trigger -> SELL (SHORT)
+    new_green_brick = (current_live_price > green_trigger)
+    new_red_brick = (current_live_price < red_trigger)
 
     if new_green_brick:
         sig = 1
-        sl_level = brick_bot
+        sl_level = float(last_brick["bot"])
         lb_dir = 1
     elif new_red_brick:
         sig = -1
-        sl_level = brick_top
+        sl_level = float(last_brick["top"])
         lb_dir = -1
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
     sync_real_wallet_fills(adapter, symbol, df=df, sl_level=sl_level)
 
     logging.info(
-        f"Live Price ({symbol}): ${current_live_price:.2f} | 3LB Top: ${brick_top:.2f} | 3LB Bot: ${brick_bot:.2f} | "
+        f"Live Price ({symbol}): ${current_live_price:.2f} | Green Trigger: ${green_trigger:.2f} | Red Trigger: ${red_trigger:.2f} | "
         f"3LB Trend: {lb_dir} | Signal: {sig} | Calculated SL: ${sl_level:.2f}"
     )
 
