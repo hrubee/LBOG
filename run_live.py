@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 from adapter import DeltaExchangeAdapter
-from lbog import lbog_strategy, linebreak
+from lbog import linebreak
 from check_delta import _make_dataframe, run_sync_protection
 
 # Configure logging
@@ -41,7 +41,7 @@ import argparse
 
 # Parse CLI parameters
 parser = argparse.ArgumentParser(description="LBOG Live Strategy Runner")
-parser.add_argument("--symbols", type=str, default="BTC,ETH", help="Comma-separated trading asset symbols (default: BTC,ETH)")
+parser.add_argument("--symbols", type=str, default="BTC", help="Comma-separated trading asset symbols (default: BTC)")
 parser.add_argument("--timeframe", type=str, default="5m", help="Candle timeframe (default: 5m)")
 parser.add_argument("--size", type=float, default=0.001, help="Default fallback position size in coin units (default: 0.001)")
 parser.add_argument("--interval", type=int, default=10, help="Loop sleep interval in seconds (default: 10)")
@@ -447,16 +447,20 @@ CANDLE_TRACKER_FILE = os.path.join(os.path.dirname(__file__), "processed_candles
 LAST_PROCESSED_CANDLE_TIME = {}
 LAST_STOPPED_CANDLE_TIME = {}
 IS_ORDER_IN_FLIGHT = {}
+# symbol -> currently ratcheted stop level, so the stop survives restarts and
+# never loosens across polling cycles.
+ACTIVE_SL = {}
 
 
 def load_candle_tracker():
-    global LAST_PROCESSED_CANDLE_TIME, LAST_STOPPED_CANDLE_TIME
+    global LAST_PROCESSED_CANDLE_TIME, LAST_STOPPED_CANDLE_TIME, ACTIVE_SL
     if os.path.exists(CANDLE_TRACKER_FILE):
         try:
             with open(CANDLE_TRACKER_FILE, "r") as f:
                 data = json.load(f)
                 LAST_PROCESSED_CANDLE_TIME = data.get("processed", {})
                 LAST_STOPPED_CANDLE_TIME = data.get("stopped", {})
+                ACTIVE_SL = data.get("active_sl", {})
         except Exception:
             pass
 
@@ -466,7 +470,8 @@ def save_candle_tracker():
         with open(CANDLE_TRACKER_FILE, "w") as f:
             json.dump({
                 "processed": LAST_PROCESSED_CANDLE_TIME,
-                "stopped": LAST_STOPPED_CANDLE_TIME
+                "stopped": LAST_STOPPED_CANDLE_TIME,
+                "active_sl": ACTIVE_SL
             }, f, indent=2)
     except Exception:
         pass
@@ -475,20 +480,30 @@ def save_candle_tracker():
 load_candle_tracker()
 
 
-def get_3lb_reversal_levels(lb_lines, n=3):
-    if not lb_lines:
-        return 0.0, 0.0
-    active = lb_lines[-1]
-    last_n = lb_lines[-n:] if len(lb_lines) >= n else lb_lines
-    
-    if active["dir"] == 1:
-        green_trigger = active["top"]
-        red_trigger = min(line["bot"] for line in last_n)
+def ratchet_stop(symbol: str, side: str, prev_candle_low: float, prev_candle_high: float) -> float:
+    """
+    Move the stop to the previous candle's low (long) / high (short), tighter only.
+
+    On a cold start with no stored level this seeds from the current previous
+    candle, which is exactly the rule for a fresh entry and self-corrects for a
+    position resumed mid-trend (it can only tighten from there).
+    """
+    prev = float(ACTIVE_SL.get(symbol) or 0.0)
+    if side == "long":
+        level = max(prev, prev_candle_low) if prev > 0 else prev_candle_low
     else:
-        green_trigger = max(line["top"] for line in last_n)
-        red_trigger = active["bot"]
-        
-    return float(green_trigger), float(red_trigger)
+        level = min(prev, prev_candle_high) if prev > 0 else prev_candle_high
+    if ACTIVE_SL.get(symbol) != level:
+        ACTIVE_SL[symbol] = level
+        save_candle_tracker()
+    return float(level)
+
+
+def clear_stop(symbol: str):
+    """Drop the ratchet when flat so the next entry starts from a fresh stop."""
+    if symbol in ACTIVE_SL:
+        ACTIVE_SL.pop(symbol, None)
+        save_candle_tracker()
 
 
 def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
@@ -516,48 +531,51 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # Fetch current live perp mark price
     current_live_price = adapter.get_perp_price(symbol)
 
-    # 3LB Brick Structural Boundaries & Reversal Trigger Levels
+    # 2. 3LB brick structure from CLOSED candles only. Line break bricks never
+    #    repaint, so a brick whose idx is the last closed bar is the
+    #    "permanently painted" entry event we are allowed to act on.
     lb_lines = linebreak(df['close'].values, n=3)
     last_brick = lb_lines[-1]
-    green_trigger, red_trigger = get_3lb_reversal_levels(lb_lines, n=3)
+    brick_printed_now = (last_brick["idx"] == len(df) - 1 and last_brick["dir"] != 0)
+    lb_dir = int(last_brick["dir"])
 
-    # 2. Run LBOG Strategy Core
-    result = lbog_strategy(df)
-    latest_bar = result.iloc[-1]
-    sig = int(latest_bar["signal"])
-    sl_level = float(latest_bar["sl_level"])
-    lb_dir = int(latest_bar["lb_dir"])
+    # "Previous candle" for the bar currently forming = the last CLOSED candle.
+    prev_candle_low = float(df["low"].iloc[-1])
+    prev_candle_high = float(df["high"].iloc[-1])
 
-    # Determine real-time 3LB brick breakout triggers:
-    # 1. New Green 3LB Brick prints when live price > green_trigger -> BUY (LONG)
-    # 2. New Red 3LB Brick prints when live price < red_trigger -> SELL (SHORT)
-    new_green_brick = (current_live_price > green_trigger)
-    new_red_brick = (current_live_price < red_trigger)
+    # Entry signal: a brick printed on a closed candle we have not acted on yet.
+    # There is deliberately no mid-candle price-crossing trigger — the candle
+    # must be closed and the brick permanently painted.
+    sig = lb_dir if (brick_printed_now and is_fresh_candle_close) else 0
 
     # Check account's active position on Delta Exchange first
     pos_info = check_existing_position(adapter, symbol, current_price=current_live_price)
 
-    if pos_info["active"] and pos_info["side"] == "short":
-        # Dynamic 3LB Trailing SL: Trail SL downwards to green_trigger (top of active 3LB pattern)
-        sl_level = min(sl_level if sl_level > 0 else green_trigger, green_trigger)
-    elif pos_info["active"] and pos_info["side"] == "long":
-        # Dynamic 3LB Trailing SL: Trail SL upwards to red_trigger (bot of active 3LB pattern)
-        sl_level = max(sl_level if sl_level > 0 else red_trigger, red_trigger)
-    elif new_green_brick:
-        sig = 1
-        sl_level = float(red_trigger)
-        lb_dir = 1
-    elif new_red_brick:
-        sig = -1
-        sl_level = float(green_trigger)
-        lb_dir = -1
+    # 3. Stop loss = previous candle's low (long) / high (short), tighter only.
+    if sig != 0:
+        target_side = "long" if sig == 1 else "short"
+    elif pos_info["active"]:
+        target_side = pos_info["side"]
+    else:
+        target_side = "flat"
+
+    if target_side == "flat":
+        clear_stop(symbol)
+        sl_level = 0.0
+    else:
+        # A fresh entry or a direction flip resets the ratchet; an existing
+        # position in the same direction keeps ratcheting from where it was.
+        if not (pos_info["active"] and pos_info["side"] == target_side):
+            clear_stop(symbol)
+        sl_level = ratchet_stop(symbol, target_side, prev_candle_low, prev_candle_high)
 
     # 3. Sync and log real wallet fills + send matplotlib chart photo to Telegram
     sync_real_wallet_fills(adapter, symbol, df=df, sl_level=sl_level)
 
     logging.info(
-        f"Live Price ({symbol}): ${current_live_price:.2f} | Green Trigger: ${green_trigger:.2f} | Red Trigger: ${red_trigger:.2f} | "
-        f"3LB Trend: {lb_dir} | Signal: {sig} | Calculated SL: ${sl_level:.2f}"
+        f"Live Price ({symbol}): ${current_live_price:.2f} | Prev Candle L/H: ${prev_candle_low:.2f} / ${prev_candle_high:.2f} | "
+        f"3LB Trend: {lb_dir} | Brick Painted This Candle: {brick_printed_now} | Fresh Candle: {is_fresh_candle_close} | "
+        f"Signal: {sig} | SL: ${sl_level:.2f}"
     )
 
     if pos_info["active"]:
@@ -581,13 +599,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     tp_level = 0.0
     tp_tiers_json = ""
 
-    # Trade Entry logic (Pure Instant Real-Time 3LB Brick Breakout Execution):
-    # Rule 1: Enter LONG INSTANTLY when a new Green 3LB Brick prints (new_green_brick or sig == 1)
-    # Rule 2: Enter SHORT INSTANTLY when a new Red 3LB Brick prints (new_red_brick or sig == -1)
-    is_new_breakout = is_fresh_candle_close or new_green_brick or new_red_brick
-
-    should_enter_long = (sig == 1) and is_new_breakout
-    should_enter_short = (sig == -1) and is_new_breakout
+    # Trade Entry logic (close-confirmed 3LB brick execution):
+    # Rule 1: Enter LONG when a Green 3LB brick is permanently painted by a closed candle
+    # Rule 2: Enter SHORT when a Red 3LB brick is permanently painted by a closed candle
+    # `sig` already carries the closed-candle + not-yet-acted-on gate.
+    should_enter_long = (sig == 1)
+    should_enter_short = (sig == -1)
 
     if should_enter_long:
         LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time

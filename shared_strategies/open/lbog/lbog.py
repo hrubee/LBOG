@@ -91,36 +91,51 @@ def lbog_core(
         bd = last_brick["dir"]
         brick_dir[i] = bd
         
+        # "Previous candle" relative to bar i — the stop level in force while
+        # bar i trades. low[i - 1] / high[i - 1] are already closed and known
+        # before bar i opens, so there is no look-ahead here.
+        prev_low = float(low[i - 1])
+        prev_high = float(high[i - 1])
+
+        # A brick only counts as an entry trigger on the bar that printed it.
+        # Line break bricks never repaint, so this is the "permanently painted"
+        # event — a stale brick from 10 bars ago must not re-enter.
+        brick_printed_now = (last_brick["idx"] == i)
+
         if pos == 0:
-            if bd == 1:
+            # Fresh entry. SL starts at the candle before the signal candle.
+            # No same-bar stop test: live, the order is placed at the signal
+            # candle's close, so that bar's range is already history.
+            if brick_printed_now and bd == 1:
                 pos = 1
-                curr_sl = last_brick["bot"]
-            elif bd == -1:
+                curr_sl = prev_low
+            elif brick_printed_now and bd == -1:
                 pos = -1
-                curr_sl = last_brick["top"]
+                curr_sl = prev_high
 
         elif pos == 1:
-            if bd == -1:
-                pos = -1
-                curr_sl = last_brick["top"]
-            elif curr_sl > 0.0 and low[i] <= curr_sl:
+            # Ratchet SL up to the previous candle's low (never loosens), then
+            # test whether this bar's low took it out. The resting exchange stop
+            # fires intrabar, so it is checked before the close-based flip.
+            curr_sl = max(curr_sl, prev_low) if curr_sl > 0.0 else prev_low
+            if low[i] <= curr_sl:
                 pos = 0
                 curr_sl = 0.0
-            else:
-                curr_sl = max(curr_sl, last_brick["bot"]) if curr_sl > 0.0 else last_brick["bot"]
+            if brick_printed_now and bd == -1:
+                # Red brick printed -> short, whether or not the stop just hit
+                pos = -1
+                curr_sl = prev_high
 
         elif pos == -1:
-            if bd == 1:
-                # 3LB Reversal Up printed -> flip to Long
-                pos = 1
-                curr_sl = last_brick["bot"]
-            elif curr_sl > 0.0 and high[i] >= curr_sl:
-                # Stop loss hit -> flatten position
+            # Ratchet SL down to the previous candle's high (never loosens).
+            curr_sl = min(curr_sl, prev_high) if curr_sl > 0.0 else prev_high
+            if high[i] >= curr_sl:
                 pos = 0
                 curr_sl = 0.0
-            else:
-                # Continue Short -> SL at 3LB structural top (highest top of line break pattern)
-                curr_sl = max(curr_sl, last_brick["top"]) if curr_sl > 0.0 else last_brick["top"]
+            if brick_printed_now and bd == 1:
+                # Green brick printed -> long, whether or not the stop just hit
+                pos = 1
+                curr_sl = prev_low
 
         position[i] = pos
         sl[i] = curr_sl
