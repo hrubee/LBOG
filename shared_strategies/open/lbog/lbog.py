@@ -39,13 +39,16 @@ def linebreak(close: np.ndarray, n: int = 3) -> list[dict]:
 STOP_MODES = ("prev_candle", "brick")
 
 
-def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: str) -> tuple[float, float]:
+def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: str,
+                stop_lookback: int = 2) -> tuple[float, float]:
     """
     Return (long_stop, short_stop) — the stop levels in force while bar `i` trades.
 
-    prev_candle : the previous candle's low / high. Tight; exits a trend after a
-                  couple of bars on any timeframe, because ordinary pullback
-                  noise routinely breaks the prior bar's extreme.
+    prev_candle : a prior candle's low / high, `stop_lookback` bars back from the
+                  bar currently trading. lookback=1 is the immediately preceding
+                  candle (tightest); lookback=2 is the candle before that, which
+                  lags price by an extra bar and so ratchets more slowly. Only
+                  this mode uses stop_lookback.
     brick       : the 3LB structural reversal level (lowest bottom / highest top
                   of the last `n` bricks) — i.e. the price at which the line
                   break chart would flip. Wider, holds trends far longer.
@@ -53,7 +56,8 @@ def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: 
     Both read only closed data (bar i-1 and earlier), so neither look-aheads.
     """
     if stop_mode == "prev_candle":
-        return float(low[i - 1]), float(high[i - 1])
+        j = max(i - stop_lookback, 0)   # clamp at the series start
+        return float(low[j]), float(high[j])
     if stop_mode == "brick":
         last_n = active_lines[-n:] if len(active_lines) >= n else active_lines
         return (
@@ -67,6 +71,7 @@ def lbog_core(
     df: pd.DataFrame,
     n: int = 3,
     stop_mode: str = "prev_candle",
+    stop_lookback: int = 2,
 ) -> pd.DataFrame:
     """
     Generate LBOG (Line Break Original) trend-following signals with 3-Line-Break (3LB).
@@ -78,8 +83,10 @@ def lbog_core(
     ----------
     df : DataFrame with open, high, low, close columns
     n : lookback depth for the line break chart reversal (default 3)
-    stop_mode : "prev_candle" (default) trails the previous candle's low/high;
+    stop_mode : "prev_candle" (default) trails a prior candle's low/high;
                 "brick" trails the 3LB structural reversal level. See stop_levels.
+    stop_lookback : how many bars back the prev_candle stop reads (default 2 —
+                the candle before the previous one). Ignored by "brick".
 
     Returns
     -------
@@ -87,6 +94,8 @@ def lbog_core(
     """
     if stop_mode not in STOP_MODES:
         raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
+    if stop_lookback < 1:
+        raise ValueError(f"stop_lookback must be >= 1, got {stop_lookback}")
     result = pd.DataFrame(index=df.index)
     close = df["close"].values
     high = df["high"].values
@@ -127,7 +136,7 @@ def lbog_core(
         brick_dir[i] = bd
         
         # Stop levels in force while bar i trades, per the selected stop_mode.
-        long_stop, short_stop = stop_levels(active_lines, low, high, i, n, stop_mode)
+        long_stop, short_stop = stop_levels(active_lines, low, high, i, n, stop_mode, stop_lookback)
 
         # A brick only counts as an entry trigger on the bar that printed it.
         # Line break bricks never repaint, so this is the "permanently painted"
@@ -189,6 +198,7 @@ def lbog_core(
     return result
 
 
-def lbog_strategy(df: pd.DataFrame, n: int = 3, stop_mode: str = "prev_candle", **kwargs) -> pd.DataFrame:
+def lbog_strategy(df: pd.DataFrame, n: int = 3, stop_mode: str = "prev_candle",
+                  stop_lookback: int = 2, **kwargs) -> pd.DataFrame:
     """Strategy wrapper entry-point for open strategy registry."""
-    return lbog_core(df, n=n, stop_mode=stop_mode)
+    return lbog_core(df, n=n, stop_mode=stop_mode, stop_lookback=stop_lookback)

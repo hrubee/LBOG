@@ -50,6 +50,12 @@ parser.add_argument(
     help="Trailing stop rule: prev_candle = previous candle's low/high (tight, exits trends in ~3 bars); "
          "brick = 3LB structural reversal level (wider, holds trends). Default: prev_candle"
 )
+parser.add_argument(
+    "--stop-lookback", type=int, default=2,
+    help="For prev_candle mode: how many candles back the stop reads. 1 = the candle "
+         "immediately before the forming one (tightest); 2 = the one before that, "
+         "lagging by an extra bar. Default: 2"
+)
 args = parser.parse_args()
 
 SYMBOLS = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -58,6 +64,9 @@ INST_TYPE = "futures"
 POSITION_SIZE = args.size
 LOOP_INTERVAL = args.interval
 STOP_MODE = args.stop_mode
+STOP_LOOKBACK = args.stop_lookback
+if STOP_LOOKBACK < 1:
+    parser.error("--stop-lookback must be >= 1")
 LB_DEPTH = 3
 
 FITS_LOG_FILE = os.path.join(BASE_DIR, 'wallet_trades.log')
@@ -478,10 +487,12 @@ def load_candle_tracker():
                 # A ratchet carried over from a different stop rule is not
                 # comparable to levels the new rule produces — drop it so the
                 # next cycle re-seeds cleanly instead of inheriting a stale level.
-                if data.get("active_sl_mode") not in (None, STOP_MODE) and ACTIVE_SL:
+                stored = (data.get("active_sl_mode"), data.get("active_sl_lookback"))
+                if stored not in ((None, None), (STOP_MODE, STOP_LOOKBACK)) and ACTIVE_SL:
                     logging.warning(
-                        f"stop-mode changed to {STOP_MODE!r} (was {data.get('active_sl_mode')!r}); "
-                        f"discarding carried-over stop levels {ACTIVE_SL}"
+                        f"stop rule changed to {STOP_MODE!r}/lookback={STOP_LOOKBACK} "
+                        f"(was {stored[0]!r}/lookback={stored[1]}); discarding "
+                        f"carried-over stop levels {ACTIVE_SL}"
                     )
                     ACTIVE_SL = {}
         except Exception:
@@ -495,7 +506,8 @@ def save_candle_tracker():
                 "processed": LAST_PROCESSED_CANDLE_TIME,
                 "stopped": LAST_STOPPED_CANDLE_TIME,
                 "active_sl": ACTIVE_SL,
-                "active_sl_mode": STOP_MODE
+                "active_sl_mode": STOP_MODE,
+                "active_sl_lookback": STOP_LOOKBACK
             }, f, indent=2)
     except Exception:
         pass
@@ -566,11 +578,12 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     brick_printed_now = (last_brick["idx"] == len(df) - 1 and last_brick["dir"] != 0)
     lb_dir = int(last_brick["dir"])
 
-    # Stop candidates for the bar currently forming. Index len(df) is that bar,
-    # so stop_levels reads bar len(df)-1 — the last CLOSED candle — exactly as
-    # lbog_core does one bar earlier in a backtest. Same rule, same code path.
+    # Stop candidates for the bar currently forming. Index len(df) is that bar, so
+    # stop_levels reads bar len(df)-STOP_LOOKBACK — exactly as lbog_core does one
+    # bar earlier in a backtest. Same rule, same function, so they cannot drift.
     long_stop, short_stop = stop_levels(
-        lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, STOP_MODE
+        lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, STOP_MODE,
+        STOP_LOOKBACK
     )
 
     # Entry signal: a brick printed on a closed candle we have not acted on yet.
@@ -774,8 +787,9 @@ def main():
     logging.info("=" * 65)
     logging.info(f"Starting LBOG Live Execution Daemon ({mode_name})")
     logging.info(
-        f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE} "
-        f"({'previous candle low/high' if STOP_MODE == 'prev_candle' else '3LB structural reversal level'})"
+        f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE}"
+        + (f" (candle low/high {STOP_LOOKBACK} bar(s) back)" if STOP_MODE == "prev_candle"
+           else " (3LB structural reversal level)")
     )
     logging.info("Exits: ratcheting stop-loss + opposite-brick flip. No take-profit (by design).")
     logging.info("=" * 65)

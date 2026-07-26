@@ -40,14 +40,32 @@ def synthetic(bars=4000, seed=11):
 
 
 def test_replay_matches_lbog_core():
-    """The engine must reproduce the live strategy's positions bar-for-bar."""
+    """
+    The engine must reproduce the live strategy's positions bar-for-bar.
+
+    stop_lookback is passed EXPLICITLY on both sides rather than relying on the
+    two defaults happening to agree — if one drifts, this test must fail rather
+    than silently compare two different rules.
+    """
     df = synthetic()
     for mode in ("prev_candle", "brick"):
         for n in (3, 5):
-            _, mine = engine.replay(df, n=n, stop_mode=mode, record=False)
-            theirs = lbog_core(df, n=n, stop_mode=mode)["position"].values
-            diff = int((mine != theirs).sum())
-            assert diff == 0, f"{mode}/n={n}: {diff}/{len(df)} bars diverge from lbog_core"
+            for lookback in (1, 2, 3):
+                _, mine = engine.replay(df, n=n, stop_mode=mode,
+                                        stop_lookback=lookback, record=False)
+                theirs = lbog_core(df, n=n, stop_mode=mode,
+                                   stop_lookback=lookback)["position"].values
+                diff = int((mine != theirs).sum())
+                assert diff == 0, \
+                    f"{mode}/n={n}/lookback={lookback}: {diff}/{len(df)} bars diverge"
+
+
+def test_default_stop_lookback_matches_strategy_core():
+    """The harness default must equal the live strategy default, or measurements lie."""
+    df = synthetic(bars=2000)
+    _, mine = engine.replay(df, n=3, stop_mode="prev_candle", record=False)
+    theirs = lbog_core(df, n=3, stop_mode="prev_candle")["position"].values
+    assert int((mine != theirs).sum()) == 0, "default stop_lookback differs between engine and core"
 
 
 def test_stop_exit_fills_at_the_stop_not_the_close():

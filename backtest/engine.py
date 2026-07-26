@@ -52,6 +52,7 @@ def replay(
     df,
     n=3,
     stop_mode="prev_candle",
+    stop_lookback=2,
     atr_mult=3.0,
     atr_period=14,
     min_brick_atr=0.0,
@@ -69,7 +70,8 @@ def replay(
 
     Stop rules
     ----------
-    prev_candle : previous candle's low / high (the live default)
+    prev_candle : a prior candle's low / high, ``stop_lookback`` bars back (the
+                  live default is 2 — the candle before the previous one)
     brick       : lowest bottom / highest top of the last ``n`` bricks
     atr         : chandelier — extreme since entry -/+ ``atr_mult`` * ATR
     none        : no trailing stop; exit only when an opposite brick prints
@@ -146,7 +148,8 @@ def replay(
 
         # Stop candidates in force while bar i trades. All read closed data only.
         if stop_mode == "prev_candle":
-            long_stop, short_stop = float(low[i - 1]), float(high[i - 1])
+            j = max(i - stop_lookback, 0)
+            long_stop, short_stop = float(low[j]), float(high[j])
         elif stop_mode == "brick":
             last_n = active[-n:] if len(active) >= n else active
             long_stop = float(min(x["bot"] for x in last_n))

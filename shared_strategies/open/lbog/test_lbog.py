@@ -95,22 +95,45 @@ def test_lbog_long_entry():
 
 
 def test_lbog_trailing_sl_long():
-    """Test that a Long SL ratchets up to the previous candle's low on every new candle."""
+    """Default stop_lookback=2: a Long SL trails the candle BEFORE the previous one."""
     closes = [10.0, 11.0, 12.0, 13.0]
     df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 12.2])
     result = lbog_core(df, n=3)
 
-    # Bar 1: up brick prints -> Long, SL = low[0] = 9.0
+    # Bar 1: up brick prints -> Long. lookback=2 clamps to low[0] = 9.0
     assert result["position"].iloc[1] == 1
     assert result["sl_level"].iloc[1] == 9.0
 
-    # Bar 2: SL trails to low[1] = 10.0 (low[2]=11.5 does not breach it)
+    # Bar 2: still clamped to low[0] = 9.0
     assert result["position"].iloc[2] == 1
-    assert result["sl_level"].iloc[2] == 10.0
+    assert result["sl_level"].iloc[2] == 9.0
 
-    # Bar 3: SL trails to low[2] = 11.5 (low[3]=12.2 does not breach it)
+    # Bar 3: SL trails to low[1] = 10.0 — one bar further back than lookback=1
     assert result["position"].iloc[3] == 1
-    assert result["sl_level"].iloc[3] == 11.5
+    assert result["sl_level"].iloc[3] == 10.0
+
+
+def test_stop_lookback_1_is_tighter_than_2():
+    """lookback=1 must ratchet strictly faster than lookback=2 on a rising series."""
+    closes = [10.0, 11.0, 12.0, 13.0]
+    df = make_ohlcv(closes, lows=[9.0, 10.0, 11.5, 12.2])
+    tight = lbog_core(df, n=3, stop_lookback=1)
+    slow = lbog_core(df, n=3, stop_lookback=2)
+
+    assert tight["sl_level"].iloc[3] == 11.5   # low[2]
+    assert slow["sl_level"].iloc[3] == 10.0    # low[1]
+    assert tight["sl_level"].iloc[3] > slow["sl_level"].iloc[3]
+
+
+def test_stop_lookback_rejects_zero():
+    """lookback must be >= 1; 0 would read the bar currently trading (look-ahead)."""
+    df = make_ohlcv([10.0, 11.0, 12.0])
+    try:
+        lbog_core(df, n=3, stop_lookback=0)
+    except ValueError as e:
+        assert "stop_lookback" in str(e)
+    else:
+        raise AssertionError("expected ValueError for stop_lookback=0")
 
 
 def test_lbog_trailing_sl_short():
@@ -121,18 +144,18 @@ def test_lbog_trailing_sl_short():
     df = make_ohlcv(closes, highs=highs, lows=lows)
     result = lbog_core(df, n=1)
 
-    # Bar 1: down brick prints -> Short, SL = previous candle high = high[0] = 12.0
+    # Bar 1: down brick prints -> Short. lookback=2 clamps to high[0] = 12.0
     assert result["position"].iloc[1] == -1
     assert result["signal"].iloc[1] == -1
     assert result["sl_level"].iloc[1] == 12.0
 
-    # Bar 2: SL trails DOWN to high[1] = 11.0 (high[2]=10.0 does not breach it)
+    # Bar 2: still clamped to high[0] = 12.0
     assert result["position"].iloc[2] == -1
-    assert result["sl_level"].iloc[2] == 11.0
+    assert result["sl_level"].iloc[2] == 12.0
 
-    # Bar 3: SL trails DOWN to high[2] = 10.0 (high[3]=9.0 does not breach it)
+    # Bar 3: SL trails DOWN to high[1] = 11.0 (high[3]=9.0 does not breach it)
     assert result["position"].iloc[3] == -1
-    assert result["sl_level"].iloc[3] == 10.0
+    assert result["sl_level"].iloc[3] == 11.0
 
 
 def test_lbog_no_reentry_without_fresh_brick():
@@ -177,17 +200,18 @@ def test_lbog_opposite_brick_flip():
 
     # Bar 0: seed
     # Bar 1: Long (up brick, dir=1), SL = low[0] = 5.0
-    # Bar 2: Short (down brick, dir=-1 since close 9.0 < last brick bot 10.0), SL = high[1] = 12.0
+    # Bar 2: Short (down brick, dir=-1 since close 9.0 < last brick bot 10.0).
+    #        lookback=2 clamps to high[0] = 11.0, not high[1] = 12.0.
     assert result["position"].iloc[1] == 1
     assert result["position"].iloc[2] == -1
     assert result["signal"].iloc[2] == -1  # Flip signal (sell/short entry)
-    assert result["sl_level"].iloc[2] == 12.0
+    assert result["sl_level"].iloc[2] == 11.0
 
 
 def test_stop_mode_brick_uses_structural_level():
     """stop_mode='brick' must trail the 3LB reversal level, not the candle low."""
     closes = [10.0, 11.0, 12.0, 13.0]
-    lows = [9.0, 10.0, 11.5, 12.2]
+    lows = [9.0, 10.8, 11.5, 12.2]
     df = make_ohlcv(closes, lows=lows)
 
     brick = lbog_core(df, n=3, stop_mode="brick")
@@ -197,16 +221,16 @@ def test_stop_mode_brick_uses_structural_level():
     # the lowest brick bottom, so the brick stop is looser than the candle stop.
     assert brick["position"].iloc[3] == 1
     assert brick["sl_level"].iloc[3] == 10.0
-    assert prev["sl_level"].iloc[3] == 11.5
+    assert prev["sl_level"].iloc[3] == 10.8          # low[1], per lookback=2
     assert brick["sl_level"].iloc[3] < prev["sl_level"].iloc[3]
 
 
 def test_stop_mode_brick_holds_trade_that_prev_candle_stops_out():
     """The two modes must actually diverge in outcome, not just in level."""
-    # A pullback that dips under the previous candle's low but stays above the
-    # 3LB structural floor: prev_candle exits, brick stays in.
+    # A pullback that dips under the candle stop but stays above the 3LB
+    # structural floor: prev_candle exits, brick stays in.
     closes = [10.0, 11.0, 12.0, 12.5]
-    lows = [9.0, 10.0, 11.5, 11.0]   # low[3]=11.0 < prev_candle stop 11.5, > brick stop 10.0
+    lows = [9.0, 10.9, 11.5, 10.5]   # low[3]=10.5 < prev stop 10.9 (=low[1]), > brick stop 10.0
     df = make_ohlcv(closes, lows=lows)
 
     assert lbog_core(df, n=3, stop_mode="prev_candle")["position"].iloc[3] == 0
@@ -229,7 +253,11 @@ def test_stop_mode_short_ratchets_in_both_modes():
         seg = [r["sl_level"].iloc[i] for i in (1, 2, 3)]
         assert all(r["position"].iloc[i] == -1 for i in (1, 2, 3)), \
             f"{mode}: short did not survive to bar 3, positions={list(r['position'])}"
-        assert seg[0] > seg[1] > seg[2], f"{mode}: short stop failed to ratchet down {seg}"
+        # Monotone non-increasing, and strictly tighter by the end. Not strictly
+        # decreasing every bar: with lookback=2 the stop holds for a bar before
+        # stepping down, which is the whole point of the slower ratchet.
+        assert seg[0] >= seg[1] >= seg[2], f"{mode}: short stop loosened {seg}"
+        assert seg[2] < seg[0], f"{mode}: short stop never ratcheted down {seg}"
 
 
 def test_stop_mode_rejects_unknown_value():

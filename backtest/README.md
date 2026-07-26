@@ -81,4 +81,24 @@ Run on 2–7 years of BTC across 15m/1h/4h (63 configurations):
 - Fewer/bigger trades (higher line-break depth, min brick size) helped
   directionally but never significantly, and flipped sign across timeframes.
 
+The one change that helped on **every** timeframe rather than flipping sign is
+`stop_lookback` — sourcing the candle stop one bar further back:
+
+```
+  TF  lookback      n   hold   gross%   net/tr%    sum%
+  5m         1  11963   2.7b  +0.001%  -0.119%   -1420%
+  5m         2  10428   3.8b  +0.010%  -0.110%   -1147%
+ 15m         1   7231   2.7b  -0.001%  -0.121%    -874%
+ 15m         2   6289   3.8b  +0.014%  -0.106%    -664%
+  1h         1   3953   2.8b  -0.007%  -0.127%    -502%
+  1h         2   3508   3.8b  +0.033%  -0.087%    -305%
+  4h         1   1523   2.8b  -0.009%  -0.129%    -196%
+  4h         2   1322   3.8b  +0.078%  -0.042%     -55%
+  4h         3   1215   4.7b  +0.112%  -0.008%      -9%
+```
+
+Gross turns positive at every timeframe and the improvement is monotone in the
+parameter, which is a far stronger pattern than any single cherry-picked config.
+Still net negative everywhere, so it reduces the bleed rather than creating edge.
+
 Before proposing a fix, check it is not on that list.

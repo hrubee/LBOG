@@ -1014,7 +1014,7 @@ def vwap_rejection_st_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:
     "lbog",
     "LBOG (Line Break Original) \u2014 close-confirmed 3LB entries with a ratcheting stop; "
     "stop_mode selects the previous-candle low/high or the 3LB structural level",
-    {"n": 3, "stop_mode": "prev_candle"},
+    {"n": 3, "stop_mode": "prev_candle", "stop_lookback": 2},
     platforms=("spot", "futures"),
 )
 def lbog_strategy(df: pd.DataFrame, **params) -> pd.DataFrame:
