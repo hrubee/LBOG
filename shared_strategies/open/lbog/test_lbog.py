@@ -382,6 +382,18 @@ def test_static_sl_rejects_negative():
         raise AssertionError("expected ValueError for negative static_sl_pct")
 
 
+def test_lbog_atr_noise_filter_filters_small_bricks():
+    """Test that min_atr_mult > 0 filters out small noise bricks while keeping strong bricks."""
+    closes = [100.0, 100.5, 101.0, 101.5, 102.0]
+    # Small changes (0.5) vs large ATR
+    df = make_ohlcv(closes, highs=[105.0]*5, lows=[95.0]*5)
+    unfiltered = lbog_core(df, n=3, min_atr_mult=0.0)
+    filtered = lbog_core(df, n=3, min_atr_mult=1.0)
+
+    assert (unfiltered["position"] != 0).any(), "Unfiltered should generate entries"
+    assert (filtered["position"] == 0).all(), "Filtered should reject tiny bricks smaller than 1.0x ATR"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

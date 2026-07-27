@@ -90,12 +90,22 @@ def stop_levels(active_lines: list[dict], low, high, i: int, n: int, stop_mode: 
     raise ValueError(f"unknown stop_mode {stop_mode!r}; expected one of {STOP_MODES}")
 
 
+def compute_atr(df: pd.DataFrame, length: int = 14) -> np.ndarray:
+    """Compute Average True Range (ATR) series."""
+    tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - df["close"].shift(1)).abs()
+    tr3 = (df["low"] - df["close"].shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(span=length, adjust=False).mean().values
+
+
 def lbog_core(
     df: pd.DataFrame,
     n: int = 3,
     stop_mode: str = "prev_candle",
     stop_lookback: int = 2,
     static_sl_pct: float = 0.0,
+    min_atr_mult: float = 0.0,
 ) -> pd.DataFrame:
     """
     Generate LBOG (Line Break Original) trend-following signals with 3-Line-Break (3LB).
@@ -112,10 +122,8 @@ def lbog_core(
     stop_lookback : how many bars back the prev_candle stop reads (default 2 —
                 the candle before the previous one). Ignored by "brick".
     static_sl_pct : fixed disaster stop as a fraction of the ENTRY price (0.01 =
-                1%). Does not trail. Combined with the trailing stop by taking
-                whichever is tighter, so it acts as a floor under any single
-                trade — including in stop_mode="none", which otherwise has no
-                hard limit on one trade's loss. 0 disables it.
+                1%). Does not trail.
+    min_atr_mult : minimum brick height in ATR multiples to filter out small noise bricks (default 1.0)
 
     Returns
     -------
@@ -139,6 +147,8 @@ def lbog_core(
         result["sl_level"] = 0.0
         result["lb_dir"] = 0
         return result
+
+    atr = compute_atr(df) if len(df) > 0 else np.zeros(num_bars)
 
     # 1. Compute Line Break bricks
     lb_lines = linebreak(close, n=n)
@@ -183,15 +193,17 @@ def lbog_core(
         # Line break bricks never repaint, so this is the "permanently painted"
         # event — a stale brick from 10 bars ago must not re-enter.
         brick_printed_now = (last_brick["idx"] == i)
+        brick_height = abs(last_brick["top"] - last_brick["bot"])
+        curr_atr = atr[i] if i < len(atr) else 0.0
+        is_strong_brick = (min_atr_mult <= 0.0) or (brick_height >= min_atr_mult * curr_atr)
 
         if pos == 0:
-            # Fresh entry. No same-bar stop test: live, the order is placed at
-            # the signal candle's close, so that bar's range is already history.
-            if brick_printed_now and bd == 1:
+            # Fresh entry. Filter out tiny noise bricks smaller than min_atr_mult * ATR
+            if brick_printed_now and is_strong_brick and bd == 1:
                 pos = 1
                 entry_px = float(close[i])
                 curr_sl = with_static(long_stop, 1)
-            elif brick_printed_now and bd == -1:
+            elif brick_printed_now and is_strong_brick and bd == -1:
                 pos = -1
                 entry_px = float(close[i])
                 curr_sl = with_static(short_stop, -1)
