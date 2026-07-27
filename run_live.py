@@ -997,6 +997,56 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             verify_protection(adapter, symbol, pos_info, sl_level)
 
 
+def warn_orphaned_positions(adapter: DeltaExchangeAdapter):
+    """
+    Report open positions this process is NOT managing.
+
+    Narrowing --symbols silently strands any position in a dropped symbol: the
+    reconciliation loop only iterates SYMBOLS, so a removed one stops being
+    watched, stops having its stop maintained, and becomes invisible. That
+    happened to an ADA long on 2026-07-26 which then sat unstopped for a day.
+
+    Detection only — deliberately no auto-close. An orphan can sit in an
+    illiquid book where a market exit fills far from mark (Delta rejected
+    exactly that with out_of_bankruptcy), so closing it unattended could be
+    worse than leaving it. Surface it and let a human decide.
+    """
+    try:
+        positions = adapter.fetch_open_positions()
+    except Exception as e:
+        logging.error(f"Orphan check failed — could not read positions: {e}")
+        return
+
+    orphans = []
+    for p in positions:
+        sym = p.get("symbol") or p.get("info", {}).get("product_symbol") or ""
+        base = str(sym).split("/")[0].upper()
+        contracts = float(p.get("contracts") or p.get("info", {}).get("size") or 0)
+        if abs(contracts) < 1e-9 or base in SYMBOLS:
+            continue
+        orphans.append((base, sym, contracts, p))
+
+    if not orphans:
+        logging.info(f"Orphan check: no open positions outside {', '.join(SYMBOLS)}.")
+        return
+
+    logging.warning("=" * 65)
+    logging.warning(f"ORPHANED POSITIONS — open but NOT managed by this process")
+    logging.warning(f"  this process manages: {', '.join(SYMBOLS)}")
+    for base, sym, contracts, p in orphans:
+        entry = float(p.get("entryPrice") or p.get("info", {}).get("entry_price") or 0)
+        try:
+            guards = adapter.list_open_stop_orders(base, INST_TYPE)
+        except Exception:
+            guards = []
+        prot = (", ".join(f"stop @ ${g['trigger_price']:,.5f}" for g in guards)
+                if guards else "NO STOP ORDER — naked")
+        logging.warning(f"  {base}: {contracts} contracts @ ${entry:,.5f} | {prot}")
+    logging.warning("  Nothing will manage or exit these. Close them manually, or add")
+    logging.warning("  the symbol back to --symbols so this process takes them over.")
+    logging.warning("=" * 65)
+
+
 def main():
     is_real = os.environ.get("DELTA_SANDBOX", "1") == "0"
     mode_name = "REAL Production API" if is_real else "Demo Account Paper Mode"
@@ -1029,6 +1079,7 @@ def main():
             except Exception as lev_err:
                 logging.warning(f"Could not set leverage to 2x on Delta for {sym}: {lev_err}")
 
+    warn_orphaned_positions(adapter)
     seed_historical_fill_ids(adapter, SYMBOLS)
     logging.info(f"Starting continuous multi-asset loop for {', '.join(SYMBOLS)} on {TIMEFRAME} chart (polling every {LOOP_INTERVAL}s)... Press Ctrl+C to stop.")
 
