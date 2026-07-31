@@ -712,9 +712,13 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     is_fresh_candle_close = (LAST_PROCESSED_CANDLE_TIME.get(symbol) != completed_candle_time)
 
     df = _make_dataframe(completed_candles)
-    
+
     # Fetch current live perp mark price
     current_live_price = adapter.get_perp_price(symbol)
+    # Close of the last completed candle — where the brick printed and where
+    # the backtest fills (entry_px = close[i]). Using this for sizing and
+    # static-SL anchor keeps live behavior identical to the backtest.
+    closed_candle_close = float(df['close'].iloc[-1])
 
     # 2. XLB brick structure from CLOSED candles only. Line break bricks never
     #    repaint, so a brick whose idx is the last closed bar is the
@@ -792,14 +796,14 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
         sl_level = ratchet_stop(symbol, target_side, long_stop, short_stop)
 
         # Fixed disaster stop, anchored to the ACTUAL fill once we hold a
-        # position (and to current price when sizing a prospective one). It does
-        # not trail, and it only ever tightens the trailing level — so in
+        # position (and to the closed candle close when sizing a prospective one).
+        # It does not trail, and it only ever tightens the trailing level — so in
         # stop_mode="none" it becomes the sole stop, giving every trade a hard
         # floor that the opposite-brick exit cannot provide.
         if STATIC_SL_PCT > 0:
             anchor = (pos_info["entry_price"]
                       if pos_info["active"] and pos_info["entry_price"] > 0
-                      else current_live_price)
+                      else closed_candle_close)
             static = (anchor * (1 - STATIC_SL_PCT) if target_side == "long"
                       else anchor * (1 + STATIC_SL_PCT))
             if sl_level <= 0:
@@ -892,7 +896,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             logging.warning(f"Skipping {symbol} entry — {size_error}. Waiting for a valid stop.")
         else:
             try:
-                trade_size = calculate_risk_size(adapter, symbol, current_live_price, sizing_stop,
+                trade_size = calculate_risk_size(adapter, symbol, closed_candle_close, sizing_stop,
                                                  risk_pct=RISK_PCT, max_leverage=2.0)
             except BalanceUnavailable as e:
                 size_error = str(e)
