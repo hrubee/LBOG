@@ -41,14 +41,21 @@ import argparse
 
 # Parse CLI parameters
 parser = argparse.ArgumentParser(description="LBOG Live Strategy Runner")
-parser.add_argument("--symbols", type=str, default="BTC", help="Comma-separated trading asset symbols (default: BTC)")
-parser.add_argument("--timeframe", type=str, default="5m", help="Candle timeframe (default: 5m)")
-parser.add_argument("--size", type=float, default=0.001, help="Default fallback position size in coin units (default: 0.001)")
-parser.add_argument("--interval", type=int, default=10, help="Loop sleep interval in seconds (default: 10)")
 parser.add_argument(
-    "--stop-mode", type=str, default="prev_candle", choices=STOP_MODES,
-    help="Trailing stop rule: prev_candle = previous candle's low/high (tight, exits trends in ~3 bars); "
-         "brick = 3LB structural reversal level (wider, holds trends). Default: prev_candle"
+    "--symbols", type=str,
+    # All crypto perpetual futures on Delta testnet (as of 2026-07).
+    # Synthetic equity/commodity contracts (NVDAX, QQQX, SPYX, SLVON, SNDKB, PAXG, XAUT)
+    # are excluded — no Binance mark-price fallback and incompatible ATR volatility profiles.
+    default="BTC,ETH,SOL,XRP,ADA,DOGE,1000SHIB,ONDO",
+    help="Comma-separated trading asset symbols (default: all crypto perps on Delta testnet)"
+)
+parser.add_argument("--timeframe", type=str, default="15m", help="Candle timeframe (default: 15m)")
+parser.add_argument("--size", type=float, default=0.001, help="Default fallback position size in coin units (default: 0.001)")
+parser.add_argument("--interval", type=int, default=30, help="Loop sleep interval in seconds (default: 30 — polls twice per 15m candle)")
+parser.add_argument(
+    "--stop-mode", type=str, default="brick",
+    help="Stop-loss placement mode:\n"
+         "brick = XLB structural reversal level (wider, holds trends). Default: prev_candle"
 )
 parser.add_argument(
     "--stop-lookback", type=int, default=2,
@@ -66,6 +73,11 @@ parser.add_argument(
     help="Fixed disaster stop as a percent of the ENTRY price (e.g. 1.0 = 1%%). Does not "
          "trail. Placed as a real resting order and used as the risk distance for position "
          "sizing, which is what makes --risk-pct actually bind. 0 disables it."
+)
+parser.add_argument(
+    "--min-brick-atr", type=float, default=1.0,
+    help="Minimum brick height in ATR multiples to filter noise bricks (default: 1.0). "
+         "Matches backtest engine's min_brick_atr parameter."
 )
 parser.add_argument(
     "--lb-depth", type=int, default=3,
@@ -92,6 +104,9 @@ if LB_DEPTH < 1:
 STATIC_SL_PCT = args.static_sl_pct / 100.0
 if not 0 <= STATIC_SL_PCT <= 0.50:
     parser.error("--static-sl-pct must be between 0 and 50")
+MIN_BRICK_ATR = args.min_brick_atr
+if MIN_BRICK_ATR < 0:
+    parser.error("--min-brick-atr must be >= 0")
 
 FITS_LOG_FILE = os.path.join(BASE_DIR, 'wallet_trades.log')
 FITS_JSON_FILE = os.path.join(BASE_DIR, 'wallet_fills.json')
@@ -203,7 +218,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         df_st.rename(columns={'datetime': 'date'}, inplace=True)
 
         lb = LineBreak(df_st)
-        lb.line_number = 3  # 3-Line Break (3LB)
+        lb.line_number = LB_DEPTH  # Dynamic Line Break depth
         data = lb.get_ohlc_data()
 
         recent_data = data.tail(35).reset_index(drop=True)
@@ -215,7 +230,7 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
             cl = row['close']
             bot = min(op, cl)
             top = max(op, cl)
-            h = max(top - bot, 1.0)
+            h = max(top - bot, top * 1e-6)
             color = '#22C55E' if cl >= op else '#EF4444'
             
             rect = patches.Rectangle((idx - 0.5, bot), 1.0, h, facecolor=color, edgecolor='#0E1117', linewidth=1, alpha=0.9)
@@ -236,11 +251,11 @@ def render_entry_chart(df, symbol: str, timeframe: str, side: str, entry_price: 
         
         y_min = min(all_y)
         y_max = max(all_y)
-        y_pad = max((y_max - y_min) * 0.08, 15.0)
+        y_pad = max((y_max - y_min) * 0.08, y_max * 0.0005)
         ax.set_ylim(y_min - y_pad, y_max + y_pad)
         ax.set_xlim(-1, n_bricks)
 
-        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [3]', fontsize=13, fontweight='bold', color='white', pad=12)
+        ax.set_title(f'{symbol}USD — {timeframe} — Delta — Line Break [{LB_DEPTH}]', fontsize=13, fontweight='bold', color='white', pad=12)
         ax.set_xlabel('Line Break Brick Index', color='#94A3B8')
         ax.set_ylabel('Price (USD)', color='#94A3B8')
         ax.grid(True, color='#1E293B', linestyle=':', alpha=0.6)
@@ -559,6 +574,15 @@ def load_candle_tracker():
                         f"carried-over stop levels {ACTIVE_SL}"
                     )
                     ACTIVE_SL = {}
+                # Candle timestamps from a different timeframe are meaningless —
+                # clear them so the first 1h (or any) close is not skipped.
+                stored_tf = data.get("active_timeframe")
+                if stored_tf and stored_tf != TIMEFRAME and LAST_PROCESSED_CANDLE_TIME:
+                    logging.warning(
+                        f"Timeframe changed to {TIMEFRAME!r} (was {stored_tf!r}); "
+                        f"discarding stale processed-candle timestamps."
+                    )
+                    LAST_PROCESSED_CANDLE_TIME = {}
         except Exception:
             pass
 
@@ -571,7 +595,8 @@ def save_candle_tracker():
                 "stopped": LAST_STOPPED_CANDLE_TIME,
                 "active_sl": ACTIVE_SL,
                 "active_sl_mode": STOP_MODE,
-                "active_sl_lookback": STOP_LOOKBACK
+                "active_sl_lookback": STOP_LOOKBACK,
+                "active_timeframe": TIMEFRAME,
             }, f, indent=2)
     except Exception:
         pass
@@ -642,9 +667,22 @@ def verify_protection(adapter: DeltaExchangeAdapter, symbol: str, pos_info: dict
 def close_position(adapter: DeltaExchangeAdapter, symbol: str, pos_info: dict, reason: str) -> bool:
     """Flatten an open position reduce-only. Returns True if the close was submitted."""
     is_buy = pos_info["side"] == "short"
+    
+    # Cancel any resting protective stop orders first to free up the reduce_only allowance
+    try:
+        resting = adapter.list_open_stop_orders(symbol, INST_TYPE)
+        if resting:
+            close_side = "buy" if is_buy else "sell"
+            oids_to_cancel = [str(o["id"]) for o in resting if o.get("side") == close_side]
+            if oids_to_cancel:
+                logging.info(f"Cancelling resting stop orders before closing position: {oids_to_cancel}")
+                adapter.cancel_orders(symbol, INST_TYPE, oids_to_cancel)
+    except Exception as e:
+        logging.warning(f"Failed to cancel stop orders before close for {symbol}: {e}")
+
     try:
         res = adapter.market_open(symbol, is_buy=is_buy, size=pos_info["size"],
-                                  inst_type=INST_TYPE, reduce_only=True)
+                                  inst_type=INST_TYPE, reduce_only=False)
         logging.info(f"Closed {pos_info['side'].upper()} {symbol} ({reason}): {res}")
         clear_stop(symbol)
         return True
@@ -665,8 +703,8 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     if not candles or len(candles) < 2:
         return
 
-    # candles[-1] is the live, in-progress 5m candle forming right now.
-    # candles[-2] is the FULLY CLOSED 5m candle.
+    # candles[-1] is the live, in-progress candle forming right now.
+    # candles[-2] is the FULLY CLOSED candle.
     completed_candles = candles[:-1]
     completed_candle_time = completed_candles[-1][0]
 
@@ -678,19 +716,19 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # Fetch current live perp mark price
     current_live_price = adapter.get_perp_price(symbol)
 
-    # 2. 3LB brick structure from CLOSED candles only. Line break bricks never
+    # 2. XLB brick structure from CLOSED candles only. Line break bricks never
     #    repaint, so a brick whose idx is the last closed bar is the
-    #    "permanently painted" entry event we are allowed to act on.
+    #    "currently painting" brick, confirming its direction. allowed to act on.
     lb_lines = linebreak(df['close'].values, n=LB_DEPTH)
     last_brick = lb_lines[-1]
     brick_printed_now = (last_brick["idx"] == len(df) - 1 and last_brick["dir"] != 0)
     lb_dir = int(last_brick["dir"])
 
-    # Stop candidates for the bar currently forming. Index len(df) is that bar, so
-    # stop_levels reads bar len(df)-STOP_LOOKBACK — exactly as lbog_core does one
+    # Stop candidates for the bar currently forming. Index len(df)-1 is the last CLOSED bar,
+    # so stop_levels reads bar len(df)-1-STOP_LOOKBACK — exactly as lbog_core does one
     # bar earlier in a backtest. Same rule, same function, so they cannot drift.
     long_stop, short_stop = stop_levels(
-        lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, STOP_MODE,
+        lb_lines, df["low"].values, df["high"].values, len(df) - 1, LB_DEPTH, STOP_MODE,
         STOP_LOOKBACK
     )
 
@@ -703,7 +741,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # the runner and the backtest the same computation instead of two that agree
     # only when nothing goes wrong.
     core = lbog_core(df, n=LB_DEPTH, stop_mode=STOP_MODE, stop_lookback=STOP_LOOKBACK,
-                     static_sl_pct=STATIC_SL_PCT)
+                     static_sl_pct=STATIC_SL_PCT, min_atr_mult=MIN_BRICK_ATR)
     target_pos = int(core["position"].iloc[-1])
 
     # Check account's active position on Delta Exchange first
@@ -714,7 +752,9 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     # The per-candle gate stays: it is what stops a failed position read from
     # re-entering every 10s, which is how the duplicate-fill burst happened.
-    needs_action = (target_pos != current_pos) and is_fresh_candle_close
+    # However, if the target is 0 (FLAT), we should ALWAYS close the position immediately
+    # even if it's mid-candle, to prevent holding orphaned positions if the stop is hit.
+    needs_action = (target_pos != current_pos) and (is_fresh_candle_close or target_pos == 0)
     sig = target_pos if needs_action else 0
 
     # Strategy says flat but we hold something -> close it out here; the entry
@@ -774,8 +814,10 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
 
     logging.info(
         f"Live Price ({symbol}): ${current_live_price:.2f} | Stop Mode: {STOP_MODE} | "
-        f"Long/Short Stop Candidate: ${long_stop:.2f} / ${short_stop:.2f} | "
-        f"3LB Trend: {lb_dir} | Brick Painted: {brick_printed_now} | Target: {target_pos:+d} Current: {current_pos:+d} | Fresh: {is_fresh_candle_close} | "
+        f"Long/Short Stop Candidate: ${long_stop:.2f} / ${short_stop:.2f}"
+    )
+    logging.info(
+        f"{LB_DEPTH}LB Trend: {lb_dir} | Brick Painted: {brick_printed_now} | Target: {target_pos:+d} Current: {current_pos:+d} | Fresh: {is_fresh_candle_close} | "
         f"Signal: {sig} | SL: ${sl_level:.2f}"
     )
 
@@ -828,7 +870,7 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     sizing_stop = sl_level
     if sl_level <= 0 and STOP_MODE == "none" and target_side != "flat":
         brick_long, brick_short = stop_levels(
-            lb_lines, df["low"].values, df["high"].values, len(df), LB_DEPTH, "brick"
+            lb_lines, df["low"].values, df["high"].values, len(df) - 1, LB_DEPTH, "brick"
         )
         sizing_stop = brick_long if target_side == "long" else brick_short
         logging.info(
@@ -868,9 +910,9 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
     # at the SL price, which would silently kill a hand-placed TP each cycle.
     tp_tiers_json = ""
 
-    # Trade Entry logic (close-confirmed 3LB brick execution):
-    # Rule 1: Enter LONG when a Green 3LB brick is permanently painted by a closed candle
-    # Rule 2: Enter SHORT when a Red 3LB brick is permanently painted by a closed candle
+    # Trade Entry logic (close-confirmed XLB brick execution):
+    # Rule 1: Enter LONG when a Green XLB brick is permanently painted by a closed candle
+    # Rule 2: Enter SHORT when a Red XLB brick is permanently painted by a closed candle
     # `sig` already carries the closed-candle + not-yet-acted-on gate.
     should_enter_long = (sig == 1)
     should_enter_short = (sig == -1)
@@ -889,40 +931,45 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             except Exception as e:
                 logging.error(f"Error syncing protection for LONG position: {e}")
             verify_protection(adapter, symbol, pos_info, sl_level)
-        elif trade_size <= 0:
-            # Deliberately leave the candle unprocessed so the next poll retries
-            # once the balance is readable again.
-            logging.error(
-                f"Skipping LONG entry on {symbol}: no valid position size "
-                f"({size_error or 'size resolved to 0'})."
-            )
         else:
-            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
-            save_candle_tracker()
-            IS_ORDER_IN_FLIGHT[symbol] = True
-            try:
-                if pos_info["active"] and pos_info["side"] == "short":
-                    logging.info(f"Reversal signal: Closing active SHORT position on {symbol} first...")
-                    adapter.market_open(symbol, is_buy=True, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
-                    time.sleep(1)
-
-                logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
-                order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
-                logging.info(f"Atomic Order & SL filled: {order_res}")
+            if pos_info["active"] and pos_info["side"] == "short":
+                logging.info(f"Reversal signal: Closing active SHORT position on {symbol} first...")
+                close_position(adapter, symbol, pos_info, reason="reversal signal flip to long")
                 time.sleep(1)
-                if sl_level > 0:
-                    try:
-                        run_sync_protection(
-                            symbol=symbol, side="long", size=trade_size, avg_cost=current_live_price, entry_atr=0.0,
-                            stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
-                            tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
-                        )
-                    except Exception as e:
-                        logging.error(f"Error placing initial SL for LONG: {e}")
-                    verify_protection(adapter, symbol,
-                                      {"active": True, "side": "long", "size": trade_size}, sl_level)
-            finally:
-                IS_ORDER_IN_FLIGHT[symbol] = False
+                # After closing, update pos_info locally so downstream checks know we're flat
+                pos_info["active"] = False
+
+            if trade_size <= 0:
+                # Deliberately leave the candle unprocessed so the next poll retries
+                # once the balance is readable again.
+                logging.error(
+                    f"Skipping LONG entry on {symbol}: no valid position size "
+                    f"({size_error or 'size resolved to 0'})."
+                )
+            else:
+                LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+                save_candle_tracker()
+                IS_ORDER_IN_FLIGHT[symbol] = True
+                try:
+                    logging.info(f"EXECUTIVE ENTRY: Opening LONG position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
+                    order_res = adapter.market_open(symbol, is_buy=True, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+                    logging.info(f"Atomic Order & SL filled: {order_res}")
+                    time.sleep(1)
+                    if sl_level > 0:
+                        try:
+                            run_sync_protection(
+                                symbol=symbol, side="long", size=trade_size, avg_cost=current_live_price, entry_atr=0.0,
+                                stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
+                                tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                            )
+                        except Exception as e:
+                            logging.error(f"Error placing initial SL for LONG: {e}")
+                        verify_protection(adapter, symbol,
+                                          {"active": True, "side": "long", "size": trade_size}, sl_level)
+                except Exception as e:
+                    logging.error(f"Failed to open LONG position: {e}")
+                finally:
+                    IS_ORDER_IN_FLIGHT[symbol] = False
 
     elif should_enter_short:
         if pos_info["active"] and pos_info["side"] == "short":
@@ -938,40 +985,44 @@ def execute_trade_cycle(adapter: DeltaExchangeAdapter, symbol: str):
             except Exception as e:
                 logging.error(f"Error syncing protection for SHORT position: {e}")
             verify_protection(adapter, symbol, pos_info, sl_level)
-        elif trade_size <= 0:
-            # Deliberately leave the candle unprocessed so the next poll retries
-            # once the balance is readable again.
-            logging.error(
-                f"Skipping SHORT entry on {symbol}: no valid position size "
-                f"({size_error or 'size resolved to 0'})."
-            )
         else:
-            LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
-            save_candle_tracker()
-            IS_ORDER_IN_FLIGHT[symbol] = True
-            try:
-                if pos_info["active"] and pos_info["side"] == "long":
-                    logging.info(f"Reversal signal: Closing active LONG position on {symbol} first...")
-                    adapter.market_open(symbol, is_buy=False, size=pos_info["size"], inst_type=INST_TYPE, reduce_only=True)
-                    time.sleep(1)
-
-                logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
-                order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
-                logging.info(f"Atomic Order & SL filled: {order_res}")
+            if pos_info["active"] and pos_info["side"] == "long":
+                logging.info(f"Reversal signal: Closing active LONG position on {symbol} first...")
+                close_position(adapter, symbol, pos_info, reason="reversal signal flip to short")
                 time.sleep(1)
-                if sl_level > 0:
-                    try:
-                        run_sync_protection(
-                            symbol=symbol, side="short", size=trade_size, avg_cost=current_live_price, entry_atr=0.0,
-                            stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
-                            tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
-                        )
-                    except Exception as e:
-                        logging.error(f"Error placing initial SL for SHORT: {e}")
-                    verify_protection(adapter, symbol,
-                                      {"active": True, "side": "short", "size": trade_size}, sl_level)
-            finally:
-                IS_ORDER_IN_FLIGHT[symbol] = False
+                pos_info["active"] = False
+
+            if trade_size <= 0:
+                # Deliberately leave the candle unprocessed so the next poll retries
+                # once the balance is readable again.
+                logging.error(
+                    f"Skipping SHORT entry on {symbol}: no valid position size "
+                    f"({size_error or 'size resolved to 0'})."
+                )
+            else:
+                LAST_PROCESSED_CANDLE_TIME[symbol] = completed_candle_time
+                save_candle_tracker()
+                IS_ORDER_IN_FLIGHT[symbol] = True
+                try:
+                    logging.info(f"EXECUTIVE ENTRY: Opening SHORT position of size {trade_size} {symbol} with Bracket SL @ ${sl_level:.2f}...")
+                    order_res = adapter.market_open(symbol, is_buy=False, size=trade_size, inst_type=INST_TYPE, stop_loss_price=sl_level if sl_level > 0 else None)
+                    logging.info(f"Atomic Order & SL filled: {order_res}")
+                    time.sleep(1)
+                    if sl_level > 0:
+                        try:
+                            run_sync_protection(
+                                symbol=symbol, side="short", size=trade_size, avg_cost=current_live_price, entry_atr=0.0,
+                                stop_loss_atr_mult=0.0, tiers_json=tp_tiers_json, stop_loss_oid="", tp_oids_json="",
+                                tp_armed_tiers_json="", inst_type=INST_TYPE, stop_loss_price=sl_level
+                            )
+                        except Exception as e:
+                            logging.error(f"Error placing initial SL for SHORT: {e}")
+                        verify_protection(adapter, symbol,
+                                          {"active": True, "side": "short", "size": trade_size}, sl_level)
+                except Exception as e:
+                    logging.error(f"Failed to open SHORT position: {e}")
+                finally:
+                    IS_ORDER_IN_FLIGHT[symbol] = False
 
     else: # sig == 0
         if pos_info["active"] and sl_level > 0:
@@ -1055,7 +1106,7 @@ def main():
     logging.info(
         f"Symbols: {', '.join(SYMBOLS)} | Timeframe: {TIMEFRAME} | Stop mode: {STOP_MODE}"
         + (f" (candle low/high {STOP_LOOKBACK} bar(s) back)" if STOP_MODE == "prev_candle"
-           else " (3LB structural reversal level)")
+           else f" ({LB_DEPTH}LB structural reversal level)")
     )
     logging.info(
         f"Risk: {100*RISK_PCT:.2f}% of wallet per trade | Line-break depth: {LB_DEPTH} | "
